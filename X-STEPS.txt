@@ -1,0 +1,72 @@
+====================================================================
+               AUTOMATED YOUTUBE PIPELINE - MASTER MANUAL
+====================================================================
+
+PHASE 1: ENVIRONMENT & CONTENT GENERATION
+--------------------------------------------------------------------
+1. Open your terminal in the root directory (D:\Automated_YouTube_Pipeline)
+   and activate your dedicated virtual environment:
+   source Sho/Scripts/activate
+
+   Run the story generation script to hit the Groq API and build your 
+     master scene layout structure:
+     python generate_story.py
+     (Output: Creates the video_package.json file with story elements)
+
+PHASE 2: VOICE CLONING (APPLIO RVC OVERRIDE) OR USE TTS
+--------------------------------------------------------------------
+
+2. Run the tracking script to record your vocal tracks line-by-line:
+   python record_audio.py
+   (Output: Generates scene_1.wav, scene_2.wav, etc. in your project folder)
+
+   Boot up your local Applio server infrastructure:
+     - Open a NEW Git Bash terminal window and ensure you are in the directory:
+       /d/Automated_YouTube_Pipeline/Applio
+     - Launch Applio using the native bash script:
+       ./run-applio.bat
+     - Open your web browser and navigate to: http://127.0.0.1:6969
+
+   Configure the Inference panel settings to prevent processing crashes:
+     - Switch the interface processing toggle from "Single" to "Batch".
+     - Select your downloaded voice model profile (e.g., DestinyGhostDinkle).
+     - Refresh and manually select the matching .index asset file layout right below it.
+     - Paste your project directory paths into the fields using forward slashes:
+       Input Path:  D:/Automated_YouTube_Pipeline/outputs/[FOLDER_NAME]/raw_audio
+       Output Path: D:/Automated_YouTube_Pipeline/outputs/[FOLDER_NAME]/converted
+
+OR -----------------------------------------------------------------------------------
+
+2. Run the audio generation to generate all audio files automatically:
+   python generate_audio.py
+
+
+PHASE 3: TIMELINE SYNCHRONIZATION & ASSET GRAPHICS
+--------------------------------------------------------------------
+3. Compile your custom variable-length narration track and rewrite your 
+   master JSON timeline timestamps automatically:
+   python stitch_audio.py
+   (Output: Generates final_voiceover.wav and updates video_package.json)
+
+   Fire up the free Pollinations AI design engine to build character-consistent 
+     MS Paint visual layout elements without needing an API key:
+     python generate_assets.py
+     (Output: Downloads all 35+ unique scene_x_[time]_image.png files)
+
+
+PHASE 4: VIDEO COMPILATION & FINISHING
+--------------------------------------------------------------------
+4. Execute the local lightweight MoviePy script to seamlessly map your visual assets 
+    and attach your narrative track without any watermarks:
+    python build_video.py
+    (Output: Exports your complete final_output_video.mp4 asset file!)
+====================================================================
+
+
+PHASE 5: STORAGE MAINTENANCE & CACHE CLEANUP
+--------------------------------------------------------------------
+5. Clean up heavy temporary asset footprints to save storage space:
+    python cleanup_project.py
+    - Hit Enter instantly to automatically clean your latest project folder.
+    - Or paste an exact older folder name to target a specific archive.
+    (Output: Safely deletes converted/, raw_audio/, and scene_images/)

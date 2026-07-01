@@ -1,0 +1,11 @@
+google-genai
+groq
+torch
+torchvision
+sounddevice
+scipy
+pydub
+moviepy
+edge-tts
+Pillow
+tavily-python

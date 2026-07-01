@@ -1,0 +1,17 @@
+# Cache and environment configurations
+.env
+.env.*
+
+# Python Virtual Environment
+Sho/
+
+# Pipeline Output & Media Storage (Prevents huge video files from uploading)
+outputs/
+Uploaded-Videos/
+
+# System and IDE specific files
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+.DS_Store
