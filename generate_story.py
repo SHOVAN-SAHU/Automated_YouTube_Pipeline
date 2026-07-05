@@ -58,6 +58,8 @@ STORY RULES
 - Hook the viewer in the first sentence with internal conflict or dramatic irony.
 - If the topic is historical: strict chronological order, no invented dialogue, accurate facts only.
 - If fictional: real emotional stakes, wit, or tension throughout.
+- There should be no individual representive, like someone with a name who is leading the story, 
+no specific name but can mention the tribe name.
 - Ultra-simple colloquial vocabulary. Short punchy sentences. No flowery prose.
 - Every sentence must advance the story forward. Never repeat or rephrase a prior idea.
 - Every sentence must be unique in meaning. No two sentences may describe the same moment, action, or setting even in different words.

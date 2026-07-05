@@ -290,11 +290,12 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
     payload = {
         "prompt": final_prompt,
         "width": SHORT_W,
-        "height": SHORT_H
+        "height": SHORT_H,
+        "num_steps": 20
     }
 
     # 3. Iterate sequentially through each available account in your pool
-    for idx, creds in enumerate(CREDENTIALS_POOL, 1):
+    for idx, creds in enumerate(list(CREDENTIALS_POOL), 1):
         api_key = creds["api_key"]
         acc_id = creds["acc_id"]
 
@@ -309,6 +310,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
         print(f"[*] [Account {idx}] Attempting scene render via Leonardo with key ending in ...{api_key[-4:]}")
         wait_time = 4.0
         account_failed = False
+        account_exhausted = False
 
         for attempt in range(max_retries):
             try:
@@ -328,6 +330,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     # OPTIMIZED: Instantly flags key as depleted and moves to next pool entry
                     print(f"[!] Account {idx} is fully exhausted (Daily 10k Limit Reached). Swapping keys...")
                     account_failed = True
+                    account_exhausted = True
                     break 
 
                 if response.status_code in (401, 403):
@@ -346,16 +349,18 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     account_failed = True
                     break
 
-                data = response.json()
+                # data = response.json()
 
-                if not data.get("success", False):
-                    print(f"[X] Account {idx} reported failure: {data.get('errors')}")
-                    account_failed = True
-                    break
+                # if not data.get("success", False):
+                #     print(f"[X] Account {idx} reported failure: {data.get('errors')}")
+                #     account_failed = True
+                #     break
 
                 # De-serialize the string metrics and dump image matrix straight to disk
-                b64_data = data["result"]["image"]
-                image_bytes = base64.b64decode(b64_data)
+                # b64_data = data["result"]["image"]
+                # image_bytes = base64.b64decode(b64_data)
+
+                image_bytes = response.content
 
                 with open(output_path, "wb") as f:
                     f.write(image_bytes)
@@ -367,6 +372,13 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                 if attempt == max_retries - 1:
                     account_failed = True
                 time.sleep(3)
+
+        if account_exhausted:
+            try:
+                CREDENTIALS_POOL.remove(creds)
+                print(f"[*] Removed Account {idx} from CREDENTIALS_POOL for the rest of this run.")
+            except ValueError:
+                pass
 
         if account_failed:
             print(f"[!] Account {idx} failed or hit allocation roof. Checking failover channel status...")
@@ -610,6 +622,16 @@ def main():
         seq = scene["sequence"]
         start_time = scene["start_time"]
 
+        if isinstance(enhanced_prompt, dict):
+            enhanced_prompt = (
+                enhanced_prompt.get("prompt")
+                or enhanced_prompt.get("enhanced_prompt")
+                or enhanced_prompt.get("text")
+                or str(enhanced_prompt)
+            )
+        elif not isinstance(enhanced_prompt, str):
+            enhanced_prompt = str(enhanced_prompt)
+        
         prompt_hash = hash(enhanced_prompt) % 1000
         image_name = f"short_scene_{seq}_{start_time}_{prompt_hash}_image.jpg"
         image_path = os.path.join(short_images_dir, image_name)

@@ -7,6 +7,9 @@ Scene Image Generator — Gemini-Enhanced Prompts
   • Groq fallback if Gemini fails for any batch
   • Cloudflare Workers AI (flux-2-klein-4b) renders the enhanced prompt into an image
   • Input/output structure of video_package.json stays identical
+  • RESUMABLE: if a run stops partway (e.g. daily neuron/credit limit hit), the next
+    run detects which scenes already have a rendered image on disk (by sequence
+    number) and only enhances/renders the remaining scenes.
 
 Requires a Cloudflare API token + Account ID with Workers AI access.
 Set them as CLOUDFLARE_API_KEY and CLOUDFLARE_ACC_ID in your .env file.
@@ -15,6 +18,7 @@ Set them as CLOUDFLARE_API_KEY and CLOUDFLARE_ACC_ID in your .env file.
 import os
 import json
 import re
+import glob
 import requests
 import time
 import base64
@@ -33,6 +37,7 @@ IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/lucid-origin")
 MAX_PROMPT_CHARS=2048  # hard limit enforced by the model's input schema
 IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
+ENHANCE_COUNT=20
 
 AESTHETIC_ANCHOR = (
     "Minimalist 2D doodle stickman illustration. "
@@ -201,6 +206,27 @@ def _parse_enhanced(raw: str, batch: list[dict]) -> list[str]:
     result=json.loads(clean)
     enhanced=result.get("enhanced_prompts", [])
 
+    normalized=[]
+    for item in enhanced:
+        if isinstance(item, str):
+            normalized.append(item)
+        elif isinstance(item, dict):
+            text=(
+                item.get("prompt")
+                or item.get("enhanced_prompt")
+                or item.get("text")
+                or item.get("visual_prompt")
+            )
+            if text:
+                normalized.append(str(text))
+            else:
+                # unrecognized shape — dump it as a string rather than crash
+                normalized.append(json.dumps(item))
+                print(f"[!] Unexpected dict shape in enhanced_prompts, no known text key found: {item}")
+        else:
+            normalized.append(str(item))
+    enhanced=normalized
+
     for i in range(len(enhanced), len(batch)):
         enhanced.append(batch[i]["visual_prompt"])
         print(f"[!] Provider returned fewer prompts than expected — using original for scene {batch[i]['sequence']}.")
@@ -264,6 +290,26 @@ def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
     return full_prompt
 
 
+# ─── RESUME HELPERS ───
+def find_existing_image(images_dir: str, sequence) -> str | None:
+    """
+    Look for an already-rendered image for this scene, keyed ONLY on the
+    scene's sequence number (e.g. 'scene_20_*_image.jpg').
+
+    We deliberately don't match on the full filename (which also encodes
+    start_time and a hash of the *enhanced* prompt text) because that text
+    is regenerated fresh by Gemini/Groq on every run — so the hash changes
+    every time even though the scene itself was already rendered. Matching
+    on sequence number alone is what makes resuming after a partial run
+    (e.g. hitting a daily image-generation limit) actually work.
+    """
+    pattern=os.path.join(images_dir, f"scene_{sequence}_*_image.jpg")
+    for match in glob.glob(pattern):
+        if os.path.getsize(match) > 1000:
+            return match
+    return None
+
+
 # ─── CREDENTIAL POOL LOADER ───
 def get_cloudflare_credentials():
     credentials = []
@@ -289,6 +335,8 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
     if not CREDENTIALS_POOL:
         print("[X] No Cloudflare credentials found in .env (Check CLOUDFLARE_API_KEY_1 / CLOUDFLARE_ACC_ID_1 etc.)")
         return False
+    
+    print(f"Model: {IMAGE_MODEL}")
 
     # 1. Process prompt structure once
     final_prompt = _build_render_prompt(enhanced_prompt, brief)
@@ -297,11 +345,12 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
     payload = {
         "prompt": final_prompt,
         "width": IMAGE_WIDTH,
-        "height": IMAGE_HEIGHT
+        "height": IMAGE_HEIGHT,
+        "num_steps": ENHANCE_COUNT
     }
 
     # 3. Iterate through available account slots
-    for idx, creds in enumerate(CREDENTIALS_POOL, 1):
+    for idx, creds in enumerate(list(CREDENTIALS_POOL), 1):
         api_key = creds["api_key"]
         acc_id = creds["acc_id"]
 
@@ -317,6 +366,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
         print(f"[*] [Account {idx}] Attempting scene render via Leonardo with key ending in ...{api_key[-4:]}")
         wait_time = 4.0
         account_failed = False
+        account_exhausted = False
 
         for attempt in range(max_retries):
             try:
@@ -335,6 +385,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                 if response.status_code == 429:
                     print(f"[!] Account {idx} is fully exhausted (Daily Free 10k Limit Reached).")
                     account_failed = True
+                    account_exhausted = True
                     break
 
                 if response.status_code in (401, 403):
@@ -353,16 +404,18 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     account_failed = True
                     break
 
-                data = response.json()
+                # data = response.json()
 
-                if not data.get("success", False):
-                    print(f"[X] Account {idx} reported failure: {data.get('errors')}")
-                    account_failed = True
-                    break
+                # if not data.get("success", False):
+                #     print(f"[X] Account {idx} reported failure: {data.get('errors')}")
+                #     account_failed = True
+                #     break
 
                 # If execution runs flawlessly: parse out and output image matrix
-                b64_data = data["result"]["image"]
-                image_bytes = base64.b64decode(b64_data)
+                # b64_data = data["result"]["image"]
+                # image_bytes = base64.b64decode(b64_data)
+
+                image_bytes = response.content
 
                 with open(output_path, "wb") as f:
                     f.write(image_bytes)
@@ -374,6 +427,13 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                 if attempt == max_retries - 1:
                     account_failed = True
                 time.sleep(3)
+
+        if account_exhausted:
+            try:
+                CREDENTIALS_POOL.remove(creds)
+                print(f"[*] Removed Account {idx} from CREDENTIALS_POOL for the rest of this run.")
+            except ValueError:
+                pass
 
         if account_failed:
             print(f"[!] Account {idx} failed or exhausted limits. Falling back to the next credential layer...")
@@ -410,6 +470,16 @@ def main():
     if not brief:
         print("[!] Warning: no brief found in video_package.json — character/setting context will be missing.")
 
+    # ─── RESUME SCAN ───
+    # Figure out which scenes already have a rendered image on disk (by
+    # sequence number) BEFORE doing any enhancement or rendering work.
+    completed_sequences={
+        scene["sequence"]
+        for scene in scenes
+        if find_existing_image(images_dir, scene["sequence"])
+    }
+    remaining_count=total_scenes - len(completed_sequences)
+
     print(f"\n[*] Project   : {os.path.basename(project_path)}")
     print(f"[*] Concept   : {story_concept}")
     print(f"[*] Character : {brief.get('main_character', 'N/A')}")
@@ -417,15 +487,32 @@ def main():
     print(f"[*] Scenes    : {total_scenes}")
     print(f"[*] Batch size: {BATCH_SIZE} scenes per call")
     print(f"[*] Enhancer  : Gemini primary → Groq fallback")
-    print(f"[*] Renderer  : Cloudflare Workers AI (flux-2-klein-4b, {IMAGE_WIDTH}x{IMAGE_HEIGHT})\n")
+    print(f"[*] Renderer  : Cloudflare Workers AI ({IMAGE_MODEL}, {IMAGE_WIDTH}x{IMAGE_HEIGHT})")
+    if completed_sequences:
+        print(f"[*] Resume    : {len(completed_sequences)}/{total_scenes} scenes already rendered — {remaining_count} remaining.")
+    print()
+
+    if remaining_count == 0:
+        print(f"[✓] All {total_scenes} scenes already rendered. Nothing to do.")
+        print(f"[*] Assets saved to: {images_dir}")
+        return
 
     gemini_client=genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     groq_client=Groq(api_key=os.environ["GROQ_API_KEY"])
-    success_count=0
+    success_count=len(completed_sequences)
 
     for batch_start in range(0, total_scenes, BATCH_SIZE):
         batch_end=min(batch_start + BATCH_SIZE, total_scenes)
         batch=scenes[batch_start:batch_end]
+
+        # Skip the whole batch (no enhancement call, no render calls) if every
+        # scene in it is already rendered — this is what saves the Gemini/Groq
+        # calls too, not just the Cloudflare image calls.
+        pending_in_batch=[s for s in batch if s["sequence"] not in completed_sequences]
+        if not pending_in_batch:
+            print(f"[=] Scenes {batch[0]['sequence']}–{batch[-1]['sequence']} already rendered — skipping batch.")
+            continue
+
         ctx_before=scenes[max(0, batch_start - WINDOW_BEFORE):batch_start]
         ctx_after=scenes[batch_end:min(total_scenes, batch_end + WINDOW_AFTER)]
 
@@ -441,14 +528,17 @@ def main():
             seq=scene["sequence"]
             start_time=scene["start_time"]
 
+            if seq in completed_sequences:
+                print(f"[=] Scene {seq}/{total_scenes} already exists — skipping.")
+                continue
+
+            if not isinstance(enhanced_prompt, str):
+                print(f"[!] Scene {seq}: enhanced_prompt was not a string ({type(enhanced_prompt)}), falling back to original visual_prompt.")
+                enhanced_prompt=str(scene.get("visual_prompt", ""))
+
             prompt_hash=hash(enhanced_prompt) % 1000
             image_name=f"scene_{seq}_{start_time}_{prompt_hash}_image.jpg"
             image_path=os.path.join(images_dir, image_name)
-
-            if os.path.exists(image_path) and os.path.getsize(image_path) > 1000:
-                print(f"[=] Scene {seq}/{total_scenes} already exists — skipping.")
-                success_count+=1
-                continue
 
             print(f"\n[...] Rendering scene {seq}/{total_scenes}")
             print(f"    Original : {scene['visual_prompt'][:70]}…")
@@ -457,6 +547,7 @@ def main():
             if generate_image_cloudflare(enhanced_prompt, brief, image_path):
                 print(f"[✓] Saved → scene_images/{image_name}")
                 success_count+=1
+                completed_sequences.add(seq)
             else:
                 print(f"[X] Failed for scene {seq} — skipping.")
 

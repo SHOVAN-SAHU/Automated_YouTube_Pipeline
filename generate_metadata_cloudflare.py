@@ -59,9 +59,8 @@ MAIN_FONT_MIN=40                   # never go below this
 SUB_FONT_MAX=44
 SUB_FONT_MIN=24
 SAFE_MARGIN=80                     # horizontal safe zone each side in px
-HIGHLIGHT_COLOR=(255, 220, 0)      # bold yellow for highlight word
-MAIN_TEXT_COLOR=(255, 255, 255)    # white for remaining main text
-SUB_TEXT_COLOR=(230, 230, 230)     # light grey for subtitle
+MAIN_TEXT_COLOR=(255, 220, 0)      # yellow for all main text
+SUB_TEXT_COLOR=(255, 255, 255)     # white for subtitle
 SHADOW_COLOR=(0, 0, 0)            # black drop shadow
 SHADOW_OFFSET=3                   # shadow offset in pixels
 BOX_PADDING=14                    # padding around highlight word box
@@ -359,21 +358,22 @@ def composite_text_overlay(image_path: str, text_copy: dict) -> str:
     cursor_x=text_x
 
     for word in words:
-        word_bbox=draw.textbbox((0, 0), word, font=main_font)
-        word_w=word_bbox[2] - word_bbox[0]
-        word_h=word_bbox[3] - word_bbox[1]
+        _draw_shadow_text(draw, cursor_x, text_y, word, main_font, MAIN_TEXT_COLOR)
+        # word_bbox=draw.textbbox((0, 0), word, font=main_font)
+        # word_w=word_bbox[2] - word_bbox[0]
+        # word_h=word_bbox[3] - word_bbox[1]
 
-        if word==highlight_word:
-            box_x1=cursor_x - BOX_PADDING
-            box_y1=text_y - BOX_PADDING
-            box_x2=cursor_x + word_w + BOX_PADDING
-            box_y2=text_y + word_h + BOX_PADDING
-            _draw_rounded_box(draw, box_x1, box_y1, box_x2, box_y2, HIGHLIGHT_COLOR, BOX_RADIUS)
-            # dark text on yellow box for max contrast
-            draw.text((cursor_x + SHADOW_OFFSET, text_y + SHADOW_OFFSET), word, font=main_font, fill=SHADOW_COLOR)
-            draw.text((cursor_x, text_y), word, font=main_font, fill=(15, 15, 15))
-        else:
-            _draw_shadow_text(draw, cursor_x, text_y, word, main_font, MAIN_TEXT_COLOR)
+        # if word==highlight_word:
+        #     box_x1=cursor_x - BOX_PADDING
+        #     box_y1=text_y - BOX_PADDING
+        #     box_x2=cursor_x + word_w + BOX_PADDING
+        #     box_y2=text_y + word_h + BOX_PADDING
+        #     _draw_rounded_box(draw, box_x1, box_y1, box_x2, box_y2, HIGHLIGHT_COLOR, BOX_RADIUS)
+        #     # dark text on yellow box for max contrast
+        #     draw.text((cursor_x + SHADOW_OFFSET, text_y + SHADOW_OFFSET), word, font=main_font, fill=SHADOW_COLOR)
+        #     draw.text((cursor_x, text_y), word, font=main_font, fill=(15, 15, 15))
+        # else:
+        #     _draw_shadow_text(draw, cursor_x, text_y, word, main_font, MAIN_TEXT_COLOR)
 
         space_bbox=draw.textbbox((0, 0), word + " ", font=main_font)
         cursor_x += space_bbox[2] - space_bbox[0]
@@ -477,11 +477,12 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
     payload = {
         "prompt": prompt,
         "width": IMAGE_WIDTH,
-        "height": IMAGE_HEIGHT
+        "height": IMAGE_HEIGHT,
+        "num_steps": 20
     }
 
     # Iterate through each available account in the pool
-    for idx, creds in enumerate(CREDENTIALS_POOL, 1):
+    for idx, creds in enumerate(list(CREDENTIALS_POOL), 1):
         api_key = creds["api_key"]
         acc_id = creds["acc_id"]
         
@@ -496,6 +497,7 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
         print(f"[*] [Account {idx}] Attempting generation with API Key ending in ...{api_key[-4:]}")
         wait_time = 4.0
         account_failed = False
+        account_exhausted = False
 
         for attempt in range(max_retries):
             try:
@@ -514,6 +516,7 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
                 if response.status_code == 429:
                     print(f"[!] Account {idx} is fully exhausted (Daily Free 10k Limit Reached).")
                     account_failed = True
+                    account_exhausted = True
                     break
 
                 if response.status_code in (401, 403):
@@ -532,16 +535,18 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
                     account_failed = True
                     break
 
-                data = response.json()
+                # data = response.json()
 
-                if not data.get("success", False):
-                    print(f"[X] Account {idx} reported failure: {data.get('errors')}")
-                    account_failed = True
-                    break
+                # if not data.get("success", False):
+                #     print(f"[X] Account {idx} reported failure: {data.get('errors')}")
+                #     account_failed = True
+                #     break
 
                 # If everything went perfectly, write the file out and return True
-                b64_data = data["result"]["image"]
-                image_bytes = base64.b64decode(b64_data)
+                # b64_data = data["result"]["image"]
+                # image_bytes = base64.b64decode(b64_data)
+
+                image_bytes = response.content
 
                 with open(output_path, "wb") as f:
                     f.write(image_bytes)
@@ -553,6 +558,13 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
                 if attempt == max_retries - 1:
                     account_failed = True
                 time.sleep(3)
+
+        if account_exhausted:
+            try:
+                CREDENTIALS_POOL.remove(creds)
+                print(f"[*] Removed Account {idx} from CREDENTIALS_POOL for the rest of this run.")
+            except ValueError:
+                pass
         
         if account_failed:
             print(f"[!] Account {idx} failed or exhausted daily limits. Dropping account and checking failover...")
@@ -638,11 +650,14 @@ def main():
     thumb_output_path=os.path.join(metadata_dir, thumb_name)
     final_payload=_build_thumbnail_prompt(thumb_concept, brief)
 
-    print(f"[...] Rendering thumbnail background via Cloudflare Workers AI …")
-    if not generate_image_cloudflare(final_payload, thumb_output_path):
-        print(f"[X] Thumbnail request failed.")
-        return
-    print(f"[✓] Background saved → metadata/{thumb_name}")
+    if os.path.exists(thumb_output_path):
+        print(f"[*] Existing background found → metadata/{thumb_name}, skipping generation.")
+    else:
+        print(f"[...] Rendering thumbnail background via Cloudflare Workers AI …")
+        if not generate_image_cloudflare(final_payload, thumb_output_path):
+            print(f"[X] Thumbnail request failed.")
+            return
+        print(f"[✓] Background saved → metadata/{thumb_name}")
 
     # 5. generate text copy via LLM
     text_copy=generate_text_copy(thumb_concept, brief, titles, gemini_client, groq_client)

@@ -37,7 +37,7 @@ def main():
     print(f"\n[*] Target Workspace Selected: {os.path.basename(project_path)}")
     
     # Define the 3 specific folders to wipe out
-    folders_to_delete = ["converted", "raw_audio", "scene_images", "metadata"]
+    folders_to_delete = ["converted", "raw_audio", "scene_images", "metadata", "Short"]
     
     # Confirmation safety prompt
     confirm = input(f"[!] Are you sure you want to delete {folders_to_delete} from this workspace? (y/n): ").strip().lower()
