@@ -1,3 +1,5 @@
+# generate_metadata_cloudflare.py
+
 import os
 import json
 import requests
@@ -22,20 +24,18 @@ IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
 
 AESTHETIC_ANCHOR = (
-    "Minimalist 2D doodle stickman illustration. "
-    "Every human is drawn as a tiny round head attached to extremely thin stick limbs like a stick. "
-    "No full human anatomy, no rounded body, no realistic proportions. "
-    "Body consists only of a simple white circular head and thin black stick arms and legs. "
-    "Simple oval or rectangular torso with flat white fill and bold black outline. "
-    "Very expressive body poses with simple gestures. "
-    "Tiny dot eyes only. Small straight mouth. "
-    "No nose. No eyelashes. No blush. No cheeks. "
-    "Hair is drawn as simple cartoon doodle shapes. "
-    "Objects are simple flat doodles with bold black outlines. "
-    "Backgrounds are simple colorful cartoon landscapes with minimal detail. "
-    "Flat colors only. Clean vector-like digital line art. "
-    "Inspired by animated explainer doodles and simple YouTube story animations. "
-    "Consistent character proportions across every scene."
+    "Cinematic flat vector art style illustration for a history documentary. "
+    "Characters are clean, solid minimalist black silhouettes of ancient humans, drawn with crisp geometric stick outlines. "
+    "The environment background is a dark, moody, atmospheric prehistoric scene (like a dark cave looking out at night, or a misty savanna at dusk). "
+    "High contrast, heavy dramatic shadows, cinematic lighting rays cutting through the dark. "
+    "Muted historical color palette, deep color grading. The entire image is rendered as a clean digital graphic novel illustration. "
+    "Widescreen composition, professional vector design where minimalist characters stand out against atmospheric environments."
+)
+
+NEGATIVE_BAN = (
+    "white background, plain canvas, cute childish cartoon, messy doodle, bright pastel colors, "
+    "realistic human anatomy, muscles, eyes, mouth, nose, 3D render, photorealism, low quality, "
+    "blurry background, paint textures, distorted faces, messy lines"
 )
 
 # font paths — Impact primary (classic thumbnail font), Arial Bold fallback
@@ -417,6 +417,7 @@ def refine_metadata(scenes: list, current_meta: dict, brief: dict, gemini_client
 def _build_thumbnail_prompt(thumb_concept: str, brief: dict) -> str:
     full_prompt=(
         f"{AESTHETIC_ANCHOR} "
+        f"Ban things: {NEGATIVE_BAN}"
         f"Main character: {brief.get('main_character', 'a stickman')}. "
         f"Setting: {brief.get('setting', 'unknown')}. "
         f"Tone: {brief.get('tone', 'dramatic')}. "

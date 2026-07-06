@@ -1,4 +1,4 @@
-# This file generate all the audio files using TTS.
+# generate_audio.py
 
 import os
 import json

@@ -1,3 +1,5 @@
+# generate_story.py
+
 import os
 import re
 import json
@@ -30,35 +32,27 @@ def _parse_json(raw: str) -> dict | list:
 # ── Step 1: prose + brief ──────────────────────────────────────────────────
 
 def _prose_prompt(topic: str, target_minutes: float) -> str:
-    target_words=int(target_minutes * 140)
-    min_words=int(target_words * 0.85)
-    max_words=int(target_words * 1.15)
+    target_words = int(target_minutes * 140)
+    min_words = int(target_words * 0.85)
+    max_words = int(target_words * 1.15)
 
     return f"""
-You are a YouTube video scriptwriter.
+You are an elite documentary scriptwriter for high-retention history and evolutionary psychology YouTube essays.
 
 TASK
 ----
-Write a continuous story about: "{topic}"
+Write a raw, gripping, analytical video essay about: "{topic}"
 Then produce a compact story brief.
 
-STORY RULES
------------
-- Hook the viewer in the first sentence with internal conflict or dramatic irony.
-- If the topic is historical: strict chronological order, no invented dialogue, accurate facts only.
-- If fictional: real emotional stakes, wit, or tension throughout.
-- There should be no individual representive, like someone with a name who is leading the story, 
-no specific name but can mention the tribe name.
-- Ultra-simple colloquial vocabulary. Short punchy sentences. No flowery prose.
-- Every sentence must advance the story forward. Never repeat or rephrase a prior idea.
-- Every sentence must be unique in meaning. No two sentences may describe the same moment, action, or setting even in different words.
+STORYTELLING RULES & FORMAT
+---------------------------
+- TONE: Visceral, intense, dark, academic yet deeply engaging. 
+- PERSPECTIVE: Write predominantly in the second person ("You") to force the viewer into the environment immediately.
+- STYLE: Use punchy, short, sharp sentences. Avoid flowery corporate transitions, marketing buzzwords, or introductory filler.
+- DATA GROUNDING: Integrate concrete biological facts, anatomical mechanics, weapons, or archaeological milestones.
+- CHARACTER CAP: Do not invent individual heroes, dialogue, or personal names. Speak of tribes, ancestors, or species.
+- Retain strict informational uniqueness. Every sentence must move the focus forward without looping back to restate prior points.
 - Total word count MUST be between {min_words} and {max_words} words.
-- Clear arc: setup → rising tension → climax → resolution.
-
-BRIEF RULES
------------
-The brief is used later to generate consistent stickman illustrations.
-Keep it tight — one line per field.
 
 OUTPUT FORMAT
 -------------
@@ -68,7 +62,7 @@ Return your response using EXACTLY these two delimiters, nothing else outside th
 Full story as plain flowing text. No JSON, no bullet points.
 </PROSE>
 <BRIEF>
-{{"main_character": "Who the story follows (name, role, one descriptor).", "setting": "Where and when the story takes place.", "visual_style": "minimalist stickman doodle, black and white", "tone": "One or two words describing the emotional tone.", "key_props": "Comma-separated list of 4-6 recurring visual elements."}}
+{{"main_character": "Solid black minimalist silhouette of an ancient hunter", "setting": "Atmospheric, misty, high-contrast historical backdrop", "visual_style": "Cinematic vector graphic silhouette, dark historical documentary mood", "tone": "Intense, dramatic, survivalist", "key_props": "primitive spears, flickering campfires, hunting tools"}}
 </BRIEF>
 """
 

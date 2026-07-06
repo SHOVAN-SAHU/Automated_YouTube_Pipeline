@@ -1,3 +1,5 @@
+# generate_images_cloudflare.py
+
 import os
 import json
 import re
@@ -23,42 +25,18 @@ IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
 
 AESTHETIC_ANCHOR = (
-    "Minimalist 2D doodle stickman illustration. "
-    "Every human is drawn as a tiny round head attached to extremely thin stick limbs like a stick. "
-    "No full human anatomy, no rounded body, no realistic proportions. "
-    "Body consists only of a simple white circular head and thin black stick arms and legs. "
-    "Simple oval or rectangular torso with flat white fill and bold black outline. "
-    "Very expressive body poses with simple gestures. "
-    "Tiny dot eyes only. Small straight mouth. "
-    "No nose. No eyelashes. No blush. No cheeks. "
-    "Hair is drawn as simple cartoon doodle shapes. "
-    "Objects are simple flat doodles with bold black outlines. "
-    "Backgrounds are simple colorful cartoon landscapes with minimal detail. "
-    "Flat colors only. Clean vector-like digital line art. "
-    "Inspired by animated explainer doodles and simple YouTube story animations. "
-    "Consistent character proportions across every scene."
+    "Cinematic flat vector art style illustration for a history documentary. "
+    "Characters are clean, solid minimalist black silhouettes of ancient humans, drawn with crisp geometric stick outlines. "
+    "The environment background is a dark, moody, atmospheric prehistoric scene (like a dark cave looking out at night, or a misty savanna at dusk). "
+    "High contrast, heavy dramatic shadows, cinematic lighting rays cutting through the dark. "
+    "Muted historical color palette, deep color grading. The entire image is rendered as a clean digital graphic novel illustration. "
+    "Widescreen composition, professional vector design where minimalist characters stand out against atmospheric environments."
 )
 
 NEGATIVE_BAN = (
-    "NO realistic humans, "
-    "NO cartoon human anatomy, "
-    "NO rounded bodies, "
-    "NO fat characters, "
-    "NO muscular characters, "
-    "NO realistic limbs, "
-    "NO detailed fingers, "
-    "NO Disney style, "
-    "NO Pixar style, "
-    "NO anime style, "
-    "NO children's book illustration, "
-    "NO painterly style, "
-    "NO airbrush, "
-    "NO gradients, "
-    "NO realistic lighting, "
-    "NO textured shading, "
-    "NO photorealism, "
-    "NO wide horizontal landscape composition with tiny characters, "
-    "NO cropped-off heads or limbs at the frame edge."
+    "cute childish cartoon, messy doodle, bright pastel colors, "
+    "realistic human anatomy, muscles, eyes, mouth, nose, 3D render, photorealism, low quality, "
+    "blurry background, paint textures, distorted faces, messy lines"
 )
 
 BATCH_SIZE=5

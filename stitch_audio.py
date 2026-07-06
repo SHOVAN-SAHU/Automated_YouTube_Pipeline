@@ -1,4 +1,4 @@
-# This file add all the .wev files into a bigger file.
+# stitch_audio.py
 
 import os
 import json

@@ -1,9 +1,4 @@
-"""
-Video Compiler — Enhanced
-  • 1080p HD output with high bitrate (YouTube will process up to 1080p/4K)
-  • Filename derived from story concept in video_package.json
-  • Subtitles: full scene narrative, 5 words per chunk, small font, safe bottom position
-"""
+# build_video.py
 
 import os
 import json
