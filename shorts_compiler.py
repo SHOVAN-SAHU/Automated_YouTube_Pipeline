@@ -1,18 +1,3 @@
-"""
-Shorts Compiler
-  • Builds a 1080x1920 (9:16) YouTube Short from the OPENING of the story —
-    walks video_package.json scenes from sequence 1 and keeps adding scenes
-    until ~60s of runtime is reached (trimming the final scene to land on
-    the limit).
-  • Renders a BRAND NEW set of vertical (1080x1920) scene images with the
-    same Cloudflare Workers AI model + prompt-enhancement
-    pipeline used for the long-form video, instead of cropping the
-    landscape long-form render — this avoids characters/props getting cut
-    off when a 16:9 image is force-cropped into 9:16.
-  • No subtitles, no thumbnail — just video + audio + metadata.txt.
-  • Everything is written to a new "Short" subfolder inside the project.
-"""
-
 import os
 import json
 import re
@@ -32,7 +17,8 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
 SHORT_W, SHORT_H = 1080, 1920          # 9:16 vertical, 1080p
 SHORT_MAX_DURATION = 60.0              # seconds
-IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/lucid-origin")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/phoenix-1.0")
+ENHANCE_COUNT = int(os.environ.get("IMAGE_ENHANCE_COUNT", 20))
 MAX_PROMPT_CHARS = 2048  # hard limit enforced by the model's input schema
 
 AESTHETIC_ANCHOR = (
@@ -291,7 +277,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
         "prompt": final_prompt,
         "width": SHORT_W,
         "height": SHORT_H,
-        "num_steps": 20
+        "num_steps": ENHANCE_COUNT
     }
 
     # 3. Iterate sequentially through each available account in your pool

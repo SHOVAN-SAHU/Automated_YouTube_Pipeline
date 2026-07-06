@@ -1,14 +1,3 @@
-"""
-Pipeline:
-  Groq call #1  → plain prose story + story brief
-  Python        → sentence-pair chunking (no LLM)
-  Groq call #2  → visual_prompts in batches of 12 (brief + prose + chunks)
-  Python        → merge into scenes[], decorate
-  Gemini        → metadata (Groq fallback)
-"""
-
-# Next story on - Ancient humans fire invension and cooking meat
-
 import os
 import re
 import json

@@ -1,15 +1,3 @@
-"""
-generate_metadata_cloudflare.py
-
-Metadata + Thumbnail Generator
-  • Loads story brief from video_package.json for character/setting consistency
-  • Gemini primary → Groq fallback for metadata refinement
-  • Brief injected into refine prompt and thumbnail render call
-  • Cloudflare Workers AI renders the background illustration
-  • LLM generates thumbnail text copy (main, sub, highlight word)
-  • Pillow composites bold text overlay onto the rendered image
-"""
-
 import os
 import json
 import requests
@@ -27,7 +15,8 @@ load_dotenv()
 BASE_DIR=r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR=os.path.join(BASE_DIR, "outputs")
 
-IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/lucid-origin")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/phoenix-1.0")
+ENHANCE_COUNT = int(os.environ.get("IMAGE_ENHANCE_COUNT", 20))
 MAX_PROMPT_CHARS=2048  # hard limit enforced by the model's input schema
 IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
@@ -478,7 +467,7 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
         "prompt": prompt,
         "width": IMAGE_WIDTH,
         "height": IMAGE_HEIGHT,
-        "num_steps": 20
+        "num_steps": ENHANCE_COUNT
     }
 
     # Iterate through each available account in the pool

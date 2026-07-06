@@ -1,20 +1,3 @@
-"""
-generate_images_cloudflare.py
-
-Scene Image Generator — Gemini-Enhanced Prompts
-  • Loads story brief from video_package.json for character/setting consistency
-  • Gemini enhances visual_prompt in batches using sliding context window + brief
-  • Groq fallback if Gemini fails for any batch
-  • Cloudflare Workers AI (flux-2-klein-4b) renders the enhanced prompt into an image
-  • Input/output structure of video_package.json stays identical
-  • RESUMABLE: if a run stops partway (e.g. daily neuron/credit limit hit), the next
-    run detects which scenes already have a rendered image on disk (by sequence
-    number) and only enhances/renders the remaining scenes.
-
-Requires a Cloudflare API token + Account ID with Workers AI access.
-Set them as CLOUDFLARE_API_KEY and CLOUDFLARE_ACC_ID in your .env file.
-"""
-
 import os
 import json
 import re
@@ -33,11 +16,11 @@ BASE_DIR=r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR=os.path.join(BASE_DIR, "outputs")
 
 # Global Constants for Leonardo Engine
-IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/lucid-origin")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/phoenix-1.0")
+ENHANCE_COUNT = int(os.environ.get("IMAGE_ENHANCE_COUNT", 20))
 MAX_PROMPT_CHARS=2048  # hard limit enforced by the model's input schema
 IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
-ENHANCE_COUNT=20
 
 AESTHETIC_ANCHOR = (
     "Minimalist 2D doodle stickman illustration. "
