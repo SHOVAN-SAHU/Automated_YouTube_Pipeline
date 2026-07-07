@@ -21,45 +21,24 @@ IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/phoenix-1.0")
 ENHANCE_COUNT = int(os.environ.get("IMAGE_ENHANCE_COUNT", 20))
 MAX_PROMPT_CHARS = 2048  # hard limit enforced by the model's input schema
 
+# MATCHED TO MAIN VIDEO STYLE: Cinematic history documentary vector art
 AESTHETIC_ANCHOR = (
-    "Minimalist 2D doodle stickman illustration. "
-    "Every human is drawn as a tiny round head attached to extremely thin stick limbs like a stick. "
-    "No full human anatomy, no rounded body, no realistic proportions. "
-    "Body consists only of a simple white circular head and thin black stick arms and legs. "
-    "Simple oval or rectangular torso with flat white fill and bold black outline. "
-    "Very expressive body poses with simple gestures. "
-    "Tiny dot eyes only. Small straight mouth. "
-    "No nose. No eyelashes. No blush. No cheeks. "
-    "Hair is drawn as simple cartoon doodle shapes. "
-    "Objects are simple flat doodles with bold black outlines. "
-    "Backgrounds are simple colorful cartoon landscapes with minimal detail. "
-    "Flat colors only. Clean vector-like digital line art. "
-    "Inspired by animated explainer doodles and simple YouTube story animations. "
-    "Consistent character proportions across every scene. "
-    "Vertical 9:16 portrait framing — compose the full body and key action "
+    "Cinematic flat vector-art illustration style for a history documentary — crisp clean outlines, "
+    "confident shapes, a stylized graphic-novel look, not photorealistic. Rich, vivid color grading that "
+    "matches the ACTUAL time of day and lighting of each specific scene: warm saturated colors (blues, "
+    "greens, ochres) for daylight scenes with fully visible, naturally colored figures, versus a dark "
+    "palette lit by warm firelight or cool moonlight for night scenes with solid black silhouette figures. "
+    "Never a flat gray, desaturated, or washed-out look regardless of time of day. Strong dramatic lighting "
+    "and shadow work in every scene. Vertical 9:16 portrait framing — compose the full scene and key action "
     "centered within the tall frame so nothing important is cropped at the edges."
 )
 
+# MATCHED TO MAIN VIDEO STYLE: Strict ban on desaturated look and 3D textures
 NEGATIVE_BAN = (
-    "NO realistic humans, "
-    "NO cartoon human anatomy, "
-    "NO rounded bodies, "
-    "NO fat characters, "
-    "NO muscular characters, "
-    "NO realistic limbs, "
-    "NO detailed fingers, "
-    "NO Disney style, "
-    "NO Pixar style, "
-    "NO anime style, "
-    "NO children's book illustration, "
-    "NO painterly style, "
-    "NO airbrush, "
-    "NO gradients, "
-    "NO realistic lighting, "
-    "NO textured shading, "
-    "NO photorealism, "
-    "NO wide horizontal landscape composition with tiny characters, "
-    "NO cropped-off heads or limbs at the frame edge."
+    "grayscale, black and white photo, sepia, desaturated, washed out colors, muddy colors, flat gray fog, "
+    "flat lighting, photorealism, 3D render, low quality, blurry, distorted anatomy, distorted faces, "
+    "messy lines, modern clothing, modern objects, text, watermark, "
+    "NO wide horizontal landscape composition with tiny characters, NO cropped-off heads or limbs at the frame edge."
 )
 
 
@@ -78,6 +57,7 @@ def slugify(text: str) -> str:
     return sanitized or "short"
 
 
+# MATCHED TO MAIN VIDEO STYLE: Includes color_mood tracking dynamically
 def _build_brief_anchor(brief: dict) -> str:
     if not brief:
         return ""
@@ -85,17 +65,13 @@ def _build_brief_anchor(brief: dict) -> str:
         f"Main character: {brief.get('main_character', 'N/A')}. "
         f"Setting: {brief.get('setting', 'N/A')}. "
         f"Recurring props: {brief.get('key_props', 'N/A')}. "
-        f"Mood/tone: {brief.get('tone', 'N/A')}."
+        f"Mood/tone: {brief.get('tone', 'N/A')}. "
+        f"Overall color & lighting mood for this story: "
+        f"{brief.get('color_mood', 'Naturally colored, matching the described setting and time of day.')}"
     )
 
 
 def select_intro_scenes(scenes: list[dict], max_duration: float = SHORT_MAX_DURATION) -> tuple[list[dict], float]:
-    """
-    Walks scenes in story order starting from sequence 1, accumulating
-    duration until max_duration is reached. The final included scene is
-    trimmed (its short_duration only — not its narrative/prompt) so the
-    Short lands as close to max_duration as possible.
-    """
     selected = []
     elapsed = 0.0
 
@@ -114,15 +90,16 @@ def select_intro_scenes(scenes: list[dict], max_duration: float = SHORT_MAX_DURA
     return selected, elapsed
 
 
+# MATCHED TO MAIN VIDEO STYLE: Prompt engineering parameters updated for history vector theme
 def _build_enhance_prompt_short(selected_scenes: list[dict], story_concept: str,
-                                 story_tone: str, brief: dict) -> str:
+                                story_tone: str, brief: dict) -> str:
     lines = [f"  Scene {s['sequence']}: {s['visual_prompt']}" for s in selected_scenes]
     scenes_block = "\n".join(lines)
     sequence_ids = [s["sequence"] for s in selected_scenes]
     brief_anchor = _build_brief_anchor(brief)
 
     return f"""
-You are a professional AI image prompt engineer specialising in minimalist stickman doodle animation for YouTube Shorts.
+You are a professional AI image prompt engineer specialising in cinematic flat vector-art illustrations for historical stories on YouTube Shorts.
 
 STORY CONTEXT
 -------------
@@ -149,19 +126,29 @@ Rules:
 2. This will render in a vertical 9:16 (1080x1920) portrait frame — compose each
    scene as a tall portrait shot (full body or medium shot, centered), not a wide
    landscape composition. Nothing important should end up near the left/right edges.
-3. Add specific visual detail: character pose, simple body language and gesture,
-   composition framing, background elements. Do NOT describe skin tone, detailed
-   facial features, muscle definition, or shading on the character's body — bodies
-   stay plain white/flat per the style.
-4. Reference the main character, setting, and props from the STORY BRIEF where relevant.
-5. Dress every character in clothing, hairstyles, and gear appropriate to the time
+3. For EACH scene, first judge its actual lighting from the narrative text and the STORY
+   BRIEF's overall color mood (e.g. bright midday, dusk, deep night, firelit, cave interior).
+4. If the scene's lighting is dark/low-light (night, deep shadow, cave interior, backlit only by
+   fire or moonlight): render the human figures as solid black silhouettes with no visible color or
+   surface detail on the body itself, set against a colorful, lit background — e.g. warm orange
+   firelight glow, cool blue moonlight — never a flat gray/desaturated background.
+5. If the scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
+   human figures with natural but stylized color — skin tone, hair, simple period-appropriate
+   clothing — fully visible and colorful against a vividly colored daylight background.
+6. State which lighting mode you chose at the start of the enhanced prompt (e.g. "Night scene,
+   black silhouette figures..." or "Bright daylight scene, fully colored figures...") so it's
+   unambiguous to the renderer.
+7. Add specific visual detail: character pose, simple body language and gesture,
+   composition framing, background elements.
+8. Reference the main character, setting, and props from the STORY BRIEF where relevant.
+9. Dress every character in clothing, hairstyles, and gear appropriate to the time
    period and setting described in the STORY BRIEF — never modern clothing unless
    the STORY BRIEF is explicitly set in modern times.
-6. If the scene includes animals, describe them in the same flat white/light body,
-   bold black outline, minimal-feature doodle style — not realistic animals.
-7. Keep each enhanced prompt under 80 words.
-8. Return ONLY a JSON object with an "enhanced_prompts" array in the same order as
-   the scenes below. No markdown, no preamble.
+10. If the scene includes animals, render them in the same lighting mode (silhouette or colored) as
+    the rest of that scene — not photorealistic.
+11. Keep each enhanced prompt under 80 words.
+12. Return ONLY a JSON object with an "enhanced_prompts" array in the same order as
+    the scenes below. No markdown, no preamble.
 
 [SCENES]
 {scenes_block}
@@ -193,7 +180,7 @@ def _parse_enhanced(raw: str, selected_scenes: list[dict]) -> list[str]:
 
 
 def enhance_intro_scenes(selected_scenes: list[dict], story_concept: str, story_tone: str,
-                          brief: dict, gemini_client, groq_client: Groq) -> list[str]:
+                         brief: dict, gemini_client, groq_client: Groq) -> list[str]:
     prompt = _build_enhance_prompt_short(selected_scenes, story_concept, story_tone, brief)
 
     try:
@@ -238,21 +225,18 @@ def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
 
 
 def get_cloudflare_credentials():
-    """Scans environment variables for pairs of API keys and Account IDs."""
     credentials = []
     i = 1
     while True:
         api_key = os.environ.get(f"CLOUDFLARE_API_KEY_{i}")
         acc_id = os.environ.get(f"CLOUDFLARE_ACC_ID_{i}")
         
-        # Stop looking once we don't find the next numbered pair
         if not api_key or not acc_id:
             break
             
         credentials.append({"api_key": api_key, "acc_id": acc_id})
         i += 1
         
-    # Fallback to the original single key variables if the numbered ones aren't used
     if not credentials:
         legacy_key = os.environ.get("CLOUDFLARE_API_KEY")
         legacy_id = os.environ.get("CLOUDFLARE_ACC_ID")
@@ -261,7 +245,7 @@ def get_cloudflare_credentials():
             
     return credentials
 
-# Load the pool at script startup
+
 CREDENTIALS_POOL = get_cloudflare_credentials()
 
 def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: str, max_retries: int = 5) -> bool:
@@ -269,10 +253,8 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
         print("[X] No Cloudflare credentials found in .env (Check CLOUDFLARE_API_KEY_1 / CLOUDFLARE_ACC_ID_1 etc.)")
         return False
 
-    # 1. Process prompt structure once outside the multi-account loop
     final_prompt = _build_render_prompt(enhanced_prompt, brief)
 
-    # 2. Build the JSON payload data block required by the Leonardo Engine
     payload = {
         "prompt": final_prompt,
         "width": SHORT_W,
@@ -280,12 +262,10 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
         "num_steps": ENHANCE_COUNT
     }
 
-    # 3. Iterate sequentially through each available account in your pool
     for idx, creds in enumerate(list(CREDENTIALS_POOL), 1):
         api_key = creds["api_key"]
         acc_id = creds["acc_id"]
 
-        # Dynamically build the endpoint URL matching the active fallback account context
         image_url = f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/ai/run/{IMAGE_MODEL}"
 
         headers = {
@@ -307,13 +287,11 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     timeout=60,
                 )
 
-                # Output daily neuron tracking metrics to terminal logs if request was valid
                 ratelimit_header = response.headers.get("Ratelimit")
                 if ratelimit_header and response.ok:
                     print(f"[*] [Account {idx}] Quota status: {ratelimit_header}")
 
                 if response.status_code == 429:
-                    # OPTIMIZED: Instantly flags key as depleted and moves to next pool entry
                     print(f"[!] Account {idx} is fully exhausted (Daily 10k Limit Reached). Swapping keys...")
                     account_failed = True
                     account_exhausted = True
@@ -334,17 +312,6 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     print(f"[X] Account {idx} error ({response.status_code}): {response.text[:200]}")
                     account_failed = True
                     break
-
-                # data = response.json()
-
-                # if not data.get("success", False):
-                #     print(f"[X] Account {idx} reported failure: {data.get('errors')}")
-                #     account_failed = True
-                #     break
-
-                # De-serialize the string metrics and dump image matrix straight to disk
-                # b64_data = data["result"]["image"]
-                # image_bytes = base64.b64decode(b64_data)
 
                 image_bytes = response.content
 
@@ -375,7 +342,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
 
 
 def build_short_video(selected_scenes: list[dict], image_paths: list[str],
-                       audio_path: str, total_duration: float, output_path: str):
+                      audio_path: str, total_duration: float, output_path: str):
     clips = []
     for scene, img_path in zip(selected_scenes, image_paths):
         clip = (
@@ -412,7 +379,6 @@ def build_short_video(selected_scenes: list[dict], image_paths: list[str],
 
     audio_clip.close()
     base_video.close()
-
 
 
 def _build_copy_prompt(data: dict, selected_scenes: list[dict], brief: dict, short_duration: float) -> str:
@@ -455,7 +421,7 @@ Write punchy, scroll-stopping YouTube Shorts metadata. Rules:
 
 
 def generate_short_copy(data: dict, selected_scenes: list[dict], brief: dict, short_duration: float,
-                         gemini_client, groq_client: Groq) -> dict:
+                        gemini_client, groq_client: Groq) -> dict:
     prompt = _build_copy_prompt(data, selected_scenes, brief, short_duration)
 
     try:
@@ -489,7 +455,7 @@ def generate_short_copy(data: dict, selected_scenes: list[dict], brief: dict, sh
 
 
 def write_metadata_txt(metadata_path: str, copy: dict, concept: str,
-                        short_duration: float, num_scenes: int):
+                       short_duration: float, num_scenes: int):
     tags = copy.get("tags", [])
     tags_line = ", ".join(tags) if isinstance(tags, list) else str(tags)
 
@@ -597,12 +563,10 @@ def main():
     gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-    # 1. enhance the opening scenes' prompts for vertical framing
     print("[...] Enhancing opening scenes for vertical framing …")
     enhanced_prompts = enhance_intro_scenes(selected_scenes, concept, story_tone, brief,
                                              gemini_client, groq_client)
 
-    # 2. render each scene as a NEW 1080x1920 image (not cropped from landscape)
     image_paths = []
     for scene, enhanced_prompt in zip(selected_scenes, enhanced_prompts):
         seq = scene["sequence"]
@@ -639,10 +603,8 @@ def main():
 
         time.sleep(1.5)
 
-    # 3. build the vertical video (no subtitles)
     build_short_video(selected_scenes, image_paths, audio_path, total_duration, output_video_path)
 
-    # 4. metadata (title/description/tags) — Gemini → Groq
     print("\n[*] Generating Short metadata (Gemini → Groq) …")
     copy = generate_short_copy(data, selected_scenes, brief, total_duration, gemini_client, groq_client)
     write_metadata_txt(metadata_path, copy, concept, total_duration, len(selected_scenes))

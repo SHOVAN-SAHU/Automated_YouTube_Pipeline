@@ -1,5 +1,3 @@
-# generate_story.py
-
 import os
 import re
 import json
@@ -62,7 +60,7 @@ Return your response using EXACTLY these two delimiters, nothing else outside th
 Full story as plain flowing text. No JSON, no bullet points.
 </PROSE>
 <BRIEF>
-{{"main_character": "Solid black minimalist silhouette of an ancient hunter", "setting": "Atmospheric, misty, high-contrast historical backdrop", "visual_style": "Cinematic vector graphic silhouette, dark historical documentary mood", "tone": "Intense, dramatic, survivalist", "key_props": "primitive spears, flickering campfires, hunting tools"}}
+{{"main_character": "Short description of the main figure(s) in this story", "setting": "Where and when this story physically takes place", "visual_style": "Cinematic vector-art illustration style, graphic-novel look", "tone": "The emotional register of this story", "key_props": "Recurring objects/tools/weapons relevant to this story", "color_mood": "Decide the ACTUAL time of day and lighting for this specific story based on its content — do not default to night or dusk. If the story plausibly happens in daylight (e.g. daytime hunting, summer, midday activity), describe a bright, vividly colored daylight palette. If it genuinely happens at night, in a cave, or lit only by fire (e.g. this fire-discovery story), describe a dark palette lit by warm firelight or cool moonlight. Be specific and topic-appropriate, e.g. 'Bright warm midday sunlight, vivid greens and ochres, fully lit and colorful' or 'Deep night lit only by flickering firelight, warm orange glow against black silhouettes'."}}
 </BRIEF>
 """
 
@@ -113,7 +111,6 @@ def generate_prose(topic: str, target_minutes: float, groq_client: Groq, gemini_
 # ── Step 2: Python chunking (no LLM) ──────────────────────────────────────
 
 def _split_sentences(text: str) -> list[str]:
-    # split on period/exclamation/question followed by whitespace or end
     raw=re.split(r'(?<=[.!?])\s+', text.strip())
     return [s.strip() for s in raw if s.strip()]
 
@@ -172,6 +169,35 @@ Return ONLY a valid JSON array in the same order as the chunks. No extra keys.
 """
 
 
+def _normalize_visual_prompts(result: list) -> list[str]:
+    """
+    Defensively extracts a visual_prompt string from each item, regardless
+    of whether the LLM returned {"visual_prompt": "..."}, a plain string,
+    or some other dict shape with the text under a different key. This is
+    what prevents a single malformed batch from KeyError-crashing the
+    entire pipeline after other batches already succeeded.
+    """
+    normalized=[]
+    for item in result:
+        if isinstance(item, str):
+            normalized.append(item)
+        elif isinstance(item, dict):
+            text=(
+                item.get("visual_prompt")
+                or item.get("prompt")
+                or item.get("description")
+                or item.get("text")
+            )
+            if text:
+                normalized.append(str(text))
+            else:
+                print(f"[!] Unexpected dict shape in visual prompt batch, no known text key found: {item}")
+                normalized.append("Stickman stands still in a minimalist scene.")
+        else:
+            normalized.append(str(item))
+    return normalized
+
+
 def generate_visual_prompts(
     chunks: list[str],
     brief: dict,
@@ -201,10 +227,8 @@ def generate_visual_prompts(
                 response_format={"type": "json_object"},
                 temperature=0.5,
             )
-            # Groq returns json_object so wrap array responses need detection
             raw=resp.choices[0].message.content
             parsed=_parse_json(raw)
-            # handle both {"items": [...]} and plain [...] responses
             result=parsed if isinstance(parsed, list) else next(
                 v for v in parsed.values() if isinstance(v, list)
             )
@@ -227,9 +251,8 @@ def generate_visual_prompts(
             except Exception as e2:
                 raise RuntimeError(f"Both failed for visual batch {batch_idx + 1}: {e2}")
 
-        prompts=[item["visual_prompt"] for item in result]
+        prompts=_normalize_visual_prompts(result)
 
-        # pad or trim to match batch size exactly
         if len(prompts) < len(batch):
             prompts += ["Stickman stands still in a minimalist scene."] * (len(batch) - len(prompts))
         prompts=prompts[:len(batch)]
@@ -350,19 +373,10 @@ def generate_pipeline(topic: str, target_minutes: float) -> dict:
     groq_client=Groq(api_key=os.environ["GROQ_API_KEY"])
     gemini_client=genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-    # 1. prose + brief from Groq (Gemini fallback)
     prose, brief=generate_prose(topic, target_minutes, groq_client, gemini_client)
-
-    # 2. Python chunking — no LLM
     chunks=chunk_prose(prose, sentences_per_scene=1)
-
-    # 3. visual prompts in batches — Groq primary, Gemini fallback per batch
     visual_prompts=generate_visual_prompts(chunks, brief, prose, groq_client, gemini_client)
-
-    # 4. merge + deduplicate
     scenes=build_scenes(chunks, visual_prompts, similarity_threshold=0.92)
-
-    # 5. metadata — Gemini primary, Groq fallback
     metadata=generate_metadata(topic, scenes, gemini_client, groq_client)
 
     return {

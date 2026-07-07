@@ -1,12 +1,9 @@
-# generate_images_cloudflare.py
-
 import os
 import json
 import re
 import glob
 import requests
 import time
-import base64
 
 from google import genai
 from groq import Groq
@@ -25,18 +22,19 @@ IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
 
 AESTHETIC_ANCHOR = (
-    "Cinematic flat vector art style illustration for a history documentary. "
-    "Characters are clean, solid minimalist black silhouettes of ancient humans, drawn with crisp geometric stick outlines. "
-    "The environment background is a dark, moody, atmospheric prehistoric scene (like a dark cave looking out at night, or a misty savanna at dusk). "
-    "High contrast, heavy dramatic shadows, cinematic lighting rays cutting through the dark. "
-    "Muted historical color palette, deep color grading. The entire image is rendered as a clean digital graphic novel illustration. "
-    "Widescreen composition, professional vector design where minimalist characters stand out against atmospheric environments."
+    "Cinematic flat vector-art illustration style for a history documentary — crisp clean outlines, "
+    "confident shapes, a stylized graphic-novel look, not photorealistic. Rich, vivid color grading that "
+    "matches the ACTUAL time of day and lighting of each specific scene: warm saturated colors (blues, "
+    "greens, ochres) for daylight scenes with fully visible, naturally colored figures, versus a dark "
+    "palette lit by warm firelight or cool moonlight for night scenes with solid black silhouette figures. "
+    "Never a flat gray, desaturated, or washed-out look regardless of time of day. Strong dramatic lighting "
+    "and shadow work in every scene. Widescreen cinematic composition."
 )
 
 NEGATIVE_BAN = (
-    "cute childish cartoon, messy doodle, bright pastel colors, "
-    "realistic human anatomy, muscles, eyes, mouth, nose, 3D render, photorealism, low quality, "
-    "blurry background, paint textures, distorted faces, messy lines"
+    "grayscale, black and white photo, sepia, desaturated, washed out colors, muddy colors, flat gray fog, "
+    "flat lighting, photorealism, 3D render, low quality, blurry, distorted anatomy, distorted faces, "
+    "messy lines, modern clothing, modern objects, text, watermark"
 )
 
 BATCH_SIZE=5
@@ -77,12 +75,13 @@ def select_project_folder() -> str:
 
 
 def _build_brief_anchor(brief: dict) -> str:
-    # builds a story-specific style anchor from the brief fields
     return (
         f"Main character: {brief['main_character']}. "
         f"Setting: {brief['setting']}. "
         f"Recurring props: {brief['key_props']}. "
-        f"Mood/tone: {brief['tone']}."
+        f"Mood/tone: {brief['tone']}. "
+        f"Overall color & lighting mood for this story: "
+        f"{brief.get('color_mood', 'Naturally colored, matching the described setting and time of day.')}"
     )
 
 
@@ -133,21 +132,28 @@ same character proportions, consistent lighting direction, consistent emotional 
 
 Rules:
 1. Keep the same narrative action as the original — do NOT invent new story events.
-2. Add specific visual detail: character pose, simple body language and gesture, composition
-   framing, background elements. Do NOT describe skin tone, detailed facial features, muscle
-   definition, or shading on the character's body — bodies stay plain white/flat per the style.
-3. Reference the main character, setting, and props from the STORY BRIEF where relevant.
-4. Dress every character in clothing, hairstyles, and gear appropriate to the time period
-   and setting described in the STORY BRIEF (e.g. animal-hide garments and bare feet for a
-   prehistoric/caveman setting, or other period-accurate attire for a different setting) —
-   never modern clothing unless the STORY BRIEF is explicitly set in modern times. All the
-   color and period detail should come through in these clothes/props/background, not the body.
-5. If the scene includes animals, describe them in the same flat white/light body, bold
-   black outline, minimal-feature doodle style as the characters — not realistic animals.
-6. Every enhanced prompt must remain in the same plain-body stick-figure doodle style described above.
-7. Keep each enhanced prompt under 80 words.
-8. Return ONLY a JSON object with an "enhanced_prompts" array in the same order as the target scenes.
-   No markdown, no preamble.
+2. For EACH target scene, first judge its actual lighting from the narrative text and the STORY
+   BRIEF's overall color mood (e.g. bright midday, dusk, deep night, firelit, cave interior).
+3. If the scene's lighting is dark/low-light (night, deep shadow, cave interior, backlit only by
+   fire or moonlight): render the human figures as solid black silhouettes with no visible color or
+   surface detail on the body itself, set against a colorful, lit background — e.g. warm orange
+   firelight glow, cool blue moonlight — never a flat gray/desaturated background.
+4. If the scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
+   human figures with natural but stylized color — skin tone, hair, simple period-appropriate
+   clothing — fully visible and colorful against a vividly colored daylight background.
+5. State which lighting mode you chose at the start of the enhanced prompt (e.g. "Night scene,
+   black silhouette figures..." or "Bright daylight scene, fully colored figures...") so it's
+   unambiguous to the renderer.
+6. Add specific visual detail: character pose, gesture, composition framing, background elements
+   appropriate to the scene's specific moment — not generic.
+7. Reference the main character, setting, and props from the STORY BRIEF where relevant, and dress
+   characters in clothing/gear appropriate to the story's time period (never modern clothing unless
+   the STORY BRIEF is explicitly set in modern times).
+8. If the scene includes animals, render them in the same lighting mode (silhouette or colored) as
+   the rest of that scene — not photorealistic.
+9. Keep each enhanced prompt under 80 words.
+10. Return ONLY a JSON object with an "enhanced_prompts" array in the same order as the target scenes.
+    No markdown, no preamble.
 {context_block}
 {target_block}
 {upcoming_block}
@@ -181,7 +187,6 @@ def _parse_enhanced(raw: str, batch: list[dict]) -> list[str]:
             if text:
                 normalized.append(str(text))
             else:
-                # unrecognized shape — dump it as a string rather than crash
                 normalized.append(json.dumps(item))
                 print(f"[!] Unexpected dict shape in enhanced_prompts, no known text key found: {item}")
         else:
@@ -235,7 +240,6 @@ def enhance_batch(
 
 
 def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
-    # injects brief anchor between style rules and scene description for consistent rendering
     brief_anchor=_build_brief_anchor(brief)
     full_prompt=(
         f"{AESTHETIC_ANCHOR} | "
@@ -243,8 +247,6 @@ def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
         f"{NEGATIVE_BAN} | "
         f"Current Scene: {enhanced_prompt}"
     )
-    # flux-2-klein-4b rejects prompts over 2048 chars — truncate defensively
-    # rather than letting the API 400 on an occasional long scene.
     if len(full_prompt) > MAX_PROMPT_CHARS:
         print(f"[!] Prompt too long ({len(full_prompt)} chars) — truncating to {MAX_PROMPT_CHARS}.")
         full_prompt=full_prompt[:MAX_PROMPT_CHARS]
@@ -253,17 +255,6 @@ def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
 
 # ─── RESUME HELPERS ───
 def find_existing_image(images_dir: str, sequence) -> str | None:
-    """
-    Look for an already-rendered image for this scene, keyed ONLY on the
-    scene's sequence number (e.g. 'scene_20_*_image.jpg').
-
-    We deliberately don't match on the full filename (which also encodes
-    start_time and a hash of the *enhanced* prompt text) because that text
-    is regenerated fresh by Gemini/Groq on every run — so the hash changes
-    every time even though the scene itself was already rendered. Matching
-    on sequence number alone is what makes resuming after a partial run
-    (e.g. hitting a daily image-generation limit) actually work.
-    """
     pattern=os.path.join(images_dir, f"scene_{sequence}_*_image.jpg")
     for match in glob.glob(pattern):
         if os.path.getsize(match) > 1000:
@@ -296,13 +287,11 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
     if not CREDENTIALS_POOL:
         print("[X] No Cloudflare credentials found in .env (Check CLOUDFLARE_API_KEY_1 / CLOUDFLARE_ACC_ID_1 etc.)")
         return False
-    
+
     print(f"Model: {IMAGE_MODEL}")
 
-    # 1. Process prompt structure once
     final_prompt = _build_render_prompt(enhanced_prompt, brief)
 
-    # 2. Build the JSON payload dictionary required by Leonardo
     payload = {
         "prompt": final_prompt,
         "width": IMAGE_WIDTH,
@@ -310,15 +299,12 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
         "num_steps": ENHANCE_COUNT
     }
 
-    # 3. Iterate through available account slots
     for idx, creds in enumerate(list(CREDENTIALS_POOL), 1):
         api_key = creds["api_key"]
         acc_id = creds["acc_id"]
 
-        # Dynamically map endpoint for the active account context
         image_url = f"https://api.cloudflare.com/client/v4/accounts/{acc_id}/ai/run/{IMAGE_MODEL}"
 
-        # CRITICAL UPDATE: Re-enabled standard Application/JSON content header
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
@@ -338,7 +324,6 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     timeout=60,
                 )
 
-                # Monitor your active allocation pool parameters
                 ratelimit_header = response.headers.get("Ratelimit")
                 if ratelimit_header and response.ok:
                     print(f"[*] [Account {idx}] Quota status: {ratelimit_header}")
@@ -364,17 +349,6 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     print(f"[X] Account {idx} error ({response.status_code}): {response.text[:200]}")
                     account_failed = True
                     break
-
-                # data = response.json()
-
-                # if not data.get("success", False):
-                #     print(f"[X] Account {idx} reported failure: {data.get('errors')}")
-                #     account_failed = True
-                #     break
-
-                # If execution runs flawlessly: parse out and output image matrix
-                # b64_data = data["result"]["image"]
-                # image_bytes = base64.b64decode(b64_data)
 
                 image_bytes = response.content
 
@@ -404,13 +378,14 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
     return False
 
 
-def main():
-    try:
-        project_path=select_project_folder()
-    except FileNotFoundError as e:
-        print(f"[X] {e}")
-        return
-
+def run(project_path: str):
+    """
+    Core image-generation stage, reusable from the master pipeline.
+    For every scene: enhances the visual_prompt in batches (Gemini -> Groq),
+    then renders one image per scene via Cloudflare Workers AI.
+    Resumable — scenes with an existing rendered image are skipped, which
+    also skips their enhancement batch call if the whole batch is done.
+    """
     json_path=os.path.join(project_path, "video_package.json")
     images_dir=os.path.join(project_path, "scene_images")
     os.makedirs(images_dir, exist_ok=True)
@@ -431,9 +406,6 @@ def main():
     if not brief:
         print("[!] Warning: no brief found in video_package.json — character/setting context will be missing.")
 
-    # ─── RESUME SCAN ───
-    # Figure out which scenes already have a rendered image on disk (by
-    # sequence number) BEFORE doing any enhancement or rendering work.
     completed_sequences={
         scene["sequence"]
         for scene in scenes
@@ -466,9 +438,6 @@ def main():
         batch_end=min(batch_start + BATCH_SIZE, total_scenes)
         batch=scenes[batch_start:batch_end]
 
-        # Skip the whole batch (no enhancement call, no render calls) if every
-        # scene in it is already rendered — this is what saves the Gemini/Groq
-        # calls too, not just the Cloudflare image calls.
         pending_in_batch=[s for s in batch if s["sequence"] not in completed_sequences]
         if not pending_in_batch:
             print(f"[=] Scenes {batch[0]['sequence']}–{batch[-1]['sequence']} already rendered — skipping batch.")
@@ -518,6 +487,15 @@ def main():
     print(f"[✓] Done! {success_count}/{total_scenes} images rendered.")
     print(f"[*] Assets saved to: {images_dir}")
     print(f"{'='*60}")
+
+
+def main():
+    try:
+        project_path=select_project_folder()
+    except FileNotFoundError as e:
+        print(f"[X] {e}")
+        return
+    run(project_path)
 
 
 if __name__ == "__main__":
