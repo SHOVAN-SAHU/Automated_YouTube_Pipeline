@@ -1,5 +1,6 @@
 import os
 import json
+import base64
 import requests
 import time
 from PIL import Image, ImageDraw, ImageFont
@@ -9,42 +10,24 @@ from google import genai
 from groq import Groq
 from dotenv import load_dotenv
 
+from pipeline_config import CHARACTER_DESIGN, AESTHETIC_ANCHOR as STYLE_ANCHOR, NEGATIVE_BAN, RECOMMENDED_IMAGE_MODEL
+
 load_dotenv()
 
 BASE_DIR=r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR=os.path.join(BASE_DIR, "outputs")
 
-IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/phoenix-1.0")
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", RECOMMENDED_IMAGE_MODEL)
 ENHANCE_COUNT = int(os.environ.get("IMAGE_ENHANCE_COUNT", 20))
 MAX_PROMPT_CHARS=2048  # hard limit enforced by the model's input schema
 IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
 
-CHANNELS_WATCH_NEXT_BLOCK = (
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "🛑 WATCH NEXT\n"
-    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "▸ What Did Ancient Humans Do at Night? \n"
-    "👉 https://youtu.be/YourVideoIDHere\n\n"
-    "▸ SIMILAR VIDEOS: Ancient Humans Theories (Playlist)\n"
-    "👉 https://youtube.com/playlist?list=PLLjWGWKfcp5s&si=FV5nY_kX6yh2A7J1\n"
-)
-
-AESTHETIC_ANCHOR = (
-    "Cinematic flat vector-art illustration style for a history documentary — crisp clean outlines, "
-    "confident shapes, a stylized graphic-novel look, not photorealistic. Rich, vivid color grading that "
-    "matches the ACTUAL time of day and lighting of each specific scene: warm saturated colors (blues, "
-    "greens, ochres) for daylight scenes with fully visible, naturally colored figures, versus a dark "
-    "palette lit by warm firelight or cool moonlight for night scenes with solid black silhouette figures. "
-    "Never a flat gray, desaturated, or washed-out look regardless of time of day. Strong dramatic lighting "
-    "and shadow work in every scene. Widescreen cinematic composition."
-)
-
-NEGATIVE_BAN = (
-    "grayscale, black and white photo, sepia, desaturated, washed out colors, muddy colors, flat gray fog, "
-    "flat lighting, photorealism, 3D render, low quality, blurry, distorted anatomy, distorted faces, "
-    "messy lines, modern clothing, modern objects, text, watermark"
-)
+# Character + base art style are locked in pipeline_config.py and shared with
+# generate_story.py / generate_images.py — this script used to define its own
+# separate "cinematic vector-art / graphic-novel" style here, which is why the
+# thumbnail didn't visually match the scene renders. Now it can't drift.
+AESTHETIC_ANCHOR = f"{CHARACTER_DESIGN} {STYLE_ANCHOR}"
 
 # font paths — Impact primary (classic thumbnail font), Arial Bold fallback
 FONT_PRIMARY=r"C:\Windows\Fonts\impact.ttf"
@@ -102,13 +85,15 @@ def _load_font(size: int) -> ImageFont.FreeTypeFont:
 
 
 def _build_brief_block(brief: dict) -> str:
+    # Fixed: this used to append brief['color_mood'] a second time right after
+    # itself with no separator ("Color mood : X" immediately followed by "X"),
+    # producing a mashed-together duplicate on the same line.
     return (
-        f"Main character : {brief.get('main_character', 'N/A')}\n"
+        f"Character's role : {brief.get('character_role', 'an ancient human')}\n"
         f"Setting        : {brief.get('setting', 'N/A')}\n"
         f"Tone           : {brief.get('tone', 'N/A')}\n"
         f"Key props      : {brief.get('key_props', 'N/A')}\n"
         f"Color mood     : {brief.get('color_mood', 'N/A')}"
-        f"{brief.get('color_mood', 'Naturally colored, matching the described setting and time of day.')}"
     )
 
 
@@ -184,7 +169,7 @@ Return your response ONLY as a clean, parsable JSON object matching this schema.
 def _build_text_copy_prompt(thumb_concept: str, brief: dict, titles: list) -> str:
     brief_block=_build_brief_block(brief)
     return f"""
-You are a YouTube thumbnail text copywriter for a minimalist stickman doodle animation channel.
+You are a YouTube thumbnail text copywriter for a minimalist, blank-round-head cartoon character explainer channel.
 
 STORY BRIEF
 -----------
@@ -361,10 +346,14 @@ def refine_metadata(scenes: list, current_meta: dict, brief: dict, gemini_client
 
 
 def _build_thumbnail_prompt(thumb_concept: str, brief: dict) -> str:
+    # Fixed: this used to concatenate NEGATIVE_BAN directly against "Main
+    # character:" with no separator/space, running them together as one
+    # unreadable blob for the renderer. Now uses the same "|" delimiter
+    # style as generate_images.py for consistency.
     full_prompt=(
-        f"{AESTHETIC_ANCHOR} "
-        f"Ban things: {NEGATIVE_BAN}"
-        f"Main character: {brief.get('main_character', 'a stick figure')}. "
+        f"{AESTHETIC_ANCHOR} | "
+        f"Avoid: {NEGATIVE_BAN} | "
+        f"Character's role: {brief.get('character_role', 'an ancient human')}. "
         f"Setting: {brief.get('setting', 'unknown')}. "
         f"Tone: {brief.get('tone', 'dramatic')}. "
         f"Design Concept: {thumb_concept}"
@@ -399,6 +388,30 @@ def get_cloudflare_credentials():
     return credentials
 
 CREDENTIALS_POOL = get_cloudflare_credentials()
+
+
+def _extract_image_bytes(response: requests.Response) -> bytes:
+    """Same fix as generate_images.py — Cloudflare's REST endpoint returns
+    JSON with a base64 'image' field, not raw bytes. See that file's version
+    of this function for the full explanation."""
+    content_type=response.headers.get("Content-Type", "")
+
+    if "application/json" in content_type or response.content.lstrip()[:1] in (b"{", b"["):
+        try:
+            data=response.json()
+        except ValueError as e:
+            raise ValueError(f"response labeled JSON but didn't parse: {e}")
+
+        b64=None
+        if isinstance(data, dict):
+            b64=(data.get("result") or {}).get("image") if isinstance(data.get("result"), dict) else None
+            b64=b64 or data.get("image")
+        if not b64:
+            raise ValueError(f"no 'image' field found in JSON response: {str(data)[:200]}")
+
+        return base64.b64decode(b64)
+
+    return response.content
 
 
 def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 5) -> bool:
@@ -464,7 +477,12 @@ def generate_image_cloudflare(prompt: str, output_path: str, max_retries: int = 
                     account_failed = True
                     break
 
-                image_bytes = response.content
+                try:
+                    image_bytes=_extract_image_bytes(response)
+                except ValueError as e:
+                    print(f"[X] Account {idx} returned a response we couldn't decode as an image: {e}")
+                    account_failed = True
+                    break
 
                 with open(output_path, "wb") as f:
                     f.write(image_bytes)
@@ -511,10 +529,10 @@ def run(project_path: str):
     brief = package_data.get("brief", {})
 
     if not brief:
-        print("[!] Warning: no brief found in video_package.json — character/setting context will be missing.")
+        print("[!] Warning: no brief found in video_package.json — setting/prop context will be missing "
+              "(character design still applies from pipeline_config.py).")
 
     print(f"\n[*] Project   : {os.path.basename(project_path)}")
-    print(f"[*] Character : {brief.get('main_character', 'N/A')}")
     print(f"[*] Setting   : {brief.get('setting', 'N/A')}")
     print(f"[*] Tone      : {brief.get('tone', 'N/A')}")
     print(f"[*] Scenes    : {len(scenes)}")
@@ -539,7 +557,9 @@ def run(project_path: str):
     tags = refined_meta.get("tags", [])
     thumb_concept = refined_meta.get("thumbnail_concept", "An interesting cartoon scene presentation.")
 
-    # 1. Define the Watch Next Block inside Python to avoid LLM formatting bugs
+    # Watch-next block is defined once here in Python to avoid LLM formatting bugs
+    # (no longer duplicated as a dead module-level constant — it was defined twice
+    # before, and only this local copy was ever actually used).
     CHANNELS_WATCH_NEXT_BLOCK = (
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🛑 WATCH NEXT\n"
@@ -550,7 +570,6 @@ def run(project_path: str):
         "👉 https://youtube.com/playlist?list=PLLjWGWKfcp5s&si=FV5nY_kX6yh2A7J1\n"
     )
 
-    # 2. Extract structured fields with protective text fallbacks if keys are empty
     l1 = refined_meta.get("line_1_deep_time", "For millennia, humanity clawed survival from an unforgiving planet.")
     l2 = refined_meta.get("line_2_visceral", "A single, relentless freeze could erase generations.")
     l3 = refined_meta.get("line_3_event", "Endless cold trapped them inside the dark.")
@@ -559,15 +578,13 @@ def run(project_path: str):
     l6 = refined_meta.get("line_6_detail", "Anatomical limitations kept their brains locked behind metabolic walls.")
     l7 = refined_meta.get("line_7_connection", "Our primal code for resilience ignites when all seems lost.")
 
-    # 3. Assemble the signature cinematic trailer layout sequentially
     desc_parts = [
         l1, l2, "",
         l3, l4, "",
         l5, l6, "",
         l7, ""
     ]
-    
-    # 4. Handle structural validation for bulleted values
+
     why_bullets = refined_meta.get("why_bullets", [])
     if len(why_bullets) >= 3:
         b1 = why_bullets[0] if why_bullets[0].lower().startswith("why") else f"Why {why_bullets[0]}"
@@ -580,37 +597,30 @@ def run(project_path: str):
             "Why freezing meat meant extinction.",
             "Why controlled fire changed everything."
         ])
-        
+
     desc_parts.append("")
     desc_parts.append(refined_meta.get("final_punchline", "This isn't a fairy tale; this is how our species survived."))
     desc_parts.append("\n" + CHANNELS_WATCH_NEXT_BLOCK)
-    
-    # 5. Append clean academic research citations or fallbacks
+
     desc_parts.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━\nSOURCES & FURTHER READING\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     if research_data:
-        # Extract lines that look like titles/urls out of your tavily tool content if needed,
-        # or fall back to the context-based reference line.
         desc_parts.append("Historical/Archaeological context derived from Wonderwerk Cave and Gesher Benot Ya’aqov records.")
     else:
         desc_parts.append("Historical/Archaeological context derived from Wonderwerk Cave and Gesher Benot Ya’aqov records.")
 
     if tags:
-        # Take the first 8 tags, remove spaces, make lowercase, and join with a space
         cleaned_hashtags = [f"#{t.replace(' ', '').lower()}" for t in tags[:8]]
         desc_parts.append("\n" + "  ".join(cleaned_hashtags))
     else:
-        # Hardcoded fallback if the tags list is completely empty
         desc_parts.append("\n#deephistory  #ancienthistory  #prehistoric  #ancienthumans  #animatedhistory")
 
     description = "\n".join(desc_parts)
 
-    # 6. Synchronize the newly formed description directly back into the master package JSON
     refined_meta["seo_description"] = description
     package_data["metadata"] = refined_meta
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(package_data, f, indent=2, ensure_ascii=False)
 
-    # 7. Output the beautiful production text file for YouTube upload
     txt_file_path = os.path.join(metadata_dir, "youtube_metadata.txt")
     with open(txt_file_path, "w", encoding="utf-8") as txt_file:
         txt_file.write("=== SUGGESTED YOUTUBE TITLES ===\n")
@@ -626,7 +636,6 @@ def run(project_path: str):
     print(f"[*] Text file saved to: metadata/youtube_metadata.txt")
     print("="*66)
 
-    # 8. Render the background image using Cloudflare Workers AI via payload
     thumb_name = "youtube_thumbnail.png"
     thumb_output_path = os.path.join(metadata_dir, thumb_name)
     final_payload = _build_thumbnail_prompt(thumb_concept, brief)
@@ -640,7 +649,6 @@ def run(project_path: str):
             return
         print(f"[✓] Background saved → metadata/{thumb_name}")
 
-    # 9. Formulate text copy details and overlay typography to finalize thumbnail execution
     text_copy = generate_text_copy(thumb_concept, brief, titles, gemini_client, groq_client)
 
     print(f"[...] Compositing text overlay …")

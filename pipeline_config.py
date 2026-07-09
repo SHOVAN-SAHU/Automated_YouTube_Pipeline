@@ -1,13 +1,3 @@
-"""
-Shared, locked visual identity for the pipeline.
-
-Both generate_story.py and generate_images.py import from here. This is the
-single source of truth for what the character/art style looks like — it used
-to be re-described (loosely, by an LLM) in the story brief, then re-described
-again (differently, hardcoded) in the image script. That drift between the
-two is a big part of why renders didn't match: nothing was actually fixed.
-"""
-
 # ── The character (matches the reference screenshot / style doc) ──────────
 CHARACTER_DESIGN = (
     "THE CHARACTER — one single consistent design, used in every image: a minimalist "
@@ -38,16 +28,43 @@ AESTHETIC_ANCHOR = (
     "sepia or desaturated gray."
 )
 
-# ── Negative prompt — expanded to specifically fight the failure modes you saw ──
+# ── Negative prompt — compressed to save token budget for scene content ────────
 NEGATIVE_BAN = (
-    "photorealism, 3D render, realistic human anatomy, extra limbs, extra fingers, "
-    "missing limbs, deformed hands, distorted face, asymmetrical body, disproportionate "
-    "head, character not matching described design, inconsistent character design, "
-    "modern clothing, modern objects, cars, buildings, text, watermark, signature, "
-    "blurry, low quality, grayscale, black and white photo, sepia, washed out colors, "
-    "muddy colors, gradient shading, airbrushed, glossy render, cropped character, "
-    "character cut off at edge of frame"
+    "photorealism, 3D render, realistic anatomy, extra/missing limbs, deformed hands, "
+    "distorted face, modern clothing/objects, text, watermark, blurry, grayscale, "
+    "sepia, gradient shading, airbrushed, glossy, cropped character"
 )
+
+# ── Shot type rotation — cycles through these to create visual variety ─────────
+# Each scene gets assigned a shot type based on its sequence number, creating
+# a natural rhythm of wide→medium→close-up→POV→etc. instead of the same
+# center-framed medium shot every time.
+SHOT_TYPES = [
+    "extreme wide establishing shot — character small in a vast landscape, emphasizing environment",
+    "medium shot — character from waist up, balanced with background",
+    "close-up — character's face and upper body fill most of the frame, background blurred/minimal",
+    "wide shot — full character visible with generous background context",
+    "low-angle shot looking up — character appears powerful/imposing, sky visible above",
+    "bird's-eye view — looking straight down at character and surroundings from above",
+    "over-shoulder shot — camera behind character looking at what they see ahead",
+    "medium-wide shot — character at one-third of frame, environment fills the rest",
+    "extreme close-up — just the character's face/hands and one key object, very tight crop",
+    "panoramic wide shot — ultra-wide landscape with character as a small figure in it",
+]
+
+# ── Composition directives — extra framing instructions per shot type ──────────
+COMPOSITION_DIRECTIVES = {
+    "extreme wide establishing shot": "Place character small (under 20% of frame) off-center. The environment IS the subject.",
+    "medium shot": "Character at center or rule-of-thirds. Show waist-up with clear background.",
+    "close-up": "Fill 60%+ of frame with character's head/shoulders. Background is simple, flat color or out-of-focus shapes.",
+    "wide shot": "Full body visible. Character occupies ~30% of frame. Rich, detailed background.",
+    "low-angle shot looking up": "Camera below character, looking up. Exaggerate character height. Sky/ceiling visible.",
+    "bird's-eye view": "Top-down camera. Character seen from directly above. Ground/terrain fills frame.",
+    "over-shoulder shot": "Camera positioned behind character's shoulder. Character's back visible. Focus on what's ahead.",
+    "medium-wide shot": "Character at left or right third. Large environment element on the opposite side.",
+    "extreme close-up": "Tight on face or hands + one object. No full body. Minimal background.",
+    "panoramic wide shot": "Ultra-wide aspect emphasis. Character tiny, landscape dominant. Horizon line prominent.",
+}
 
 # ── Image model ─────────────────────────────────────────────────────────
 # phoenix-1.0 is tuned for photoreal/painterly prompt-adherence, which is a poor

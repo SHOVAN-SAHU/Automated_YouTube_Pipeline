@@ -2,6 +2,7 @@ import os
 import json
 import re
 import glob
+import base64
 import requests
 import time
 
@@ -9,36 +10,35 @@ from google import genai
 from groq import Groq
 from dotenv import load_dotenv
 
+from pipeline_config import CHARACTER_DESIGN, AESTHETIC_ANCHOR as STYLE_ANCHOR, NEGATIVE_BAN, RECOMMENDED_IMAGE_MODEL
+
 load_dotenv()
 
 BASE_DIR=r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR=os.path.join(BASE_DIR, "outputs")
 
-# Global Constants for Leonardo Engine
-IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", "@cf/leonardo/phoenix-1.0")
+# Global Constants for Render Engine
+# Default now comes from pipeline_config (Leonardo Lucid Origin) — better
+# prompt-adherence for a locked, simple flat-vector character than Phoenix,
+# which is tuned more for painterly/photoreal prompt-following. Still
+# overridable via env var if you want to A/B against flux-1-schnell etc.
+IMAGE_MODEL = os.environ.get("IMAGE_MODEL_TARGET", RECOMMENDED_IMAGE_MODEL)
 ENHANCE_COUNT = int(os.environ.get("IMAGE_ENHANCE_COUNT", 20))
-MAX_PROMPT_CHARS=2048  # hard limit enforced by the model's input schema
+# Cloudflare's documented schema for @cf/leonardo/lucid-origin only specifies
+# minLength: 1 on `prompt` — no documented max. 2048 was a leftover guess from
+# a different model and was silently chopping prompts mid-sentence (cutting off
+# the negative-prompt list or scene action at random). With the CHARACTER_DESIGN
+# duplication fixed, prompts should now land well under this anyway — this is
+# a safety net, not an expected/normal limit.
+MAX_PROMPT_CHARS=4000
 IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
 
-AESTHETIC_ANCHOR = (
-    "Flat matte-paint / cutout animation style for a history explainer video — clean thick uniform-width "
-    "outlines, confident simple shapes, solid FLAT color fills with little to no gradient or texture, "
-    "stylized paper-cutout look, not photorealistic and not moody/gritty by default. Backgrounds are simple "
-    "flat color blocks (a solid sky, a solid ground plane, minimal flat scenery shapes) rather than dark, "
-    "heavily textured, or atmospheric renders. Color and brightness should follow the ACTUAL time of day and "
-    "lighting of each specific scene: vivid, warm, fully-lit flat colors (blues, greens, ochres, tans) for "
-    "daylight scenes, versus a cooler flat palette lit by warm firelight or cool moonlight accents for night "
-    "scenes — darkness should read as a color choice (deep flat blues/purples), not as gloom, low contrast, "
-    "or heavy shadow. Never a flat gray, desaturated, sepia, or washed-out look regardless of time of day. "
-    "Widescreen cinematic composition."
-)
-
-NEGATIVE_BAN = (
-    "grayscale, black and white photo, sepia, desaturated, washed out colors, muddy colors, flat gray fog, "
-    "flat lighting, photorealism, 3D render, low quality, blurry, distorted anatomy, distorted faces, "
-    "messy lines, modern clothing, modern objects, text, watermark"
-)
+# The character design + base art style are now locked in pipeline_config.py
+# and shared with generate_story.py, instead of being redefined here separately
+# (that split was the main source of "character doesn't match" hallucination —
+# the two scripts had no guarantee of agreeing on what the character looked like).
+AESTHETIC_ANCHOR = f"{CHARACTER_DESIGN} {STYLE_ANCHOR}"
 
 BATCH_SIZE=5
 WINDOW_BEFORE=3
@@ -78,11 +78,15 @@ def select_project_folder() -> str:
 
 
 def _build_brief_anchor(brief: dict) -> str:
+    # character_role is just narrative flavor (e.g. "a Neanderthal hunting
+    # party") — the actual visual design (CHARACTER_DESIGN) is injected once,
+    # separately, via AESTHETIC_ANCHOR. Do NOT also put CHARACTER_DESIGN here:
+    # that duplication is what blew the final render prompt up to ~3800 chars.
     return (
-        f"Main character: {brief['main_character']}. "
-        f"Setting: {brief['setting']}. "
-        f"Recurring props: {brief['key_props']}. "
-        f"Mood/tone: {brief['tone']}. "
+        f"Character's role in this story: {brief.get('character_role', 'an ancient human')}. "
+        f"Setting: {brief.get('setting', '')}. "
+        f"Recurring props: {brief.get('key_props', '')}. "
+        f"Mood/tone: {brief.get('tone', '')}. "
         f"Overall color & lighting mood for this story: "
         f"{brief.get('color_mood', 'Naturally colored, matching the described setting and time of day.')}. "
         f"Night/low-light figure style for THIS story: {brief.get('night_figure_style', 'colored')}."
@@ -90,26 +94,11 @@ def _build_brief_anchor(brief: dict) -> str:
 
 
 def _night_figure_style(brief: dict) -> str:
-    """
-    Whether human figures stay fully colored or go solid-black-silhouette during
-    night/cave/low-light scenes is now a per-story creative decision made once
-    in the brief (generate_story.py), not a hardcoded rule — different stories
-    call for different treatments. Defaults to 'colored' for older briefs that
-    predate this field, matching the flatter, less moody paint style.
-    """
     style=str(brief.get("night_figure_style", "colored")).strip().lower()
     return "silhouette" if style.startswith("silhouette") else "colored"
 
 
 def _fmt_scenes(scenes: list[dict], label: str) -> str:
-    """
-    Renders each scene along with its authoritative continuity tags —
-    location / lighting / established_facts — which were computed once,
-    sequentially, back in generate_story.py. These tags are ground truth:
-    they're far more reliable than asking the enhancer to re-infer world
-    state from a narrow ±N scene window of prompt text alone, which is
-    what used to cause fire/cave continuity breaks.
-    """
     if not scenes:
         return ""
     lines=[f"\n[{label}]"]
@@ -142,21 +131,22 @@ def _build_enhance_prompt(
     night_style=_night_figure_style(brief)
 
     return f"""
-You are a professional AI image prompt engineer specialising in minimalist stickman doodle animation for YouTube.
+You are a professional AI image prompt engineer specialising in a locked, minimalist cartoon character design for a YouTube explainer channel.
 
 STORY CONTEXT
 -------------
 Concept : {story_concept}
 Tone    : {story_tone}
 
-STORY BRIEF (use this to keep character, setting, and props consistent across all scenes)
+CHARACTER + STORY BRIEF (the character design is FIXED — never alter its described appearance,
+only its pose/expression/action per scene; use the rest for setting, props, mood consistency)
 -----------------------------------------------------------------------------------------
 {brief_anchor}
 
 VISUAL STYLE (must be obeyed in every enhanced prompt)
 -------------------------------------------------------
 {AESTHETIC_ANCHOR}
-{NEGATIVE_BAN}
+Avoid: {NEGATIVE_BAN}
 
 CONTINUITY IS GROUND TRUTH
 --------------------------
@@ -183,29 +173,27 @@ same character proportions, consistent lighting direction, consistent emotional 
 
 Rules:
 1. Keep the same narrative action as the original — do NOT invent new story events.
-2. Use each TARGET scene's own Location / Lighting / Established facts tags as the primary
+2. Do NOT re-describe the character's fixed appearance (head shape, eyes, tunic, etc.) —
+   that's already stated once above in VISUAL STYLE and will be included automatically at
+   render time. Repeating it here would just waste your word budget. Focus entirely on THIS
+   scene's specific pose, action, expression, and background.
+3. Use each TARGET scene's own Location / Lighting / Established facts tags as the primary
    signal for how to render it, cross-checked against the STORY BRIEF's overall color mood.
-3. This story's NIGHT FIGURE STYLE is: "{night_style}". Apply it to every scene whose lighting
+4. This story's NIGHT FIGURE STYLE is: "{night_style}". Apply it to every scene whose lighting
    is dark/low-light (night, deep shadow, cave interior, backlit only by fire or moonlight):
-   - If night_style is "silhouette": render the human figures as solid black silhouettes with no
+   - If night_style is "silhouette": render the character as a solid black silhouette with no
      visible color or surface detail on the body itself, set against a colorful, lit flat-color
      background — e.g. warm orange firelight glow, cool blue moonlight.
-   - If night_style is "colored": keep the human figures fully visible in flat stylized color
-     (skin tone, hair, simple period-appropriate clothing), just shift the palette to a cooler,
-     darker flat tone (deep blues/purples with warm firelight or moonlight accents) instead of the
-     bright daylight palette. Do not desaturate to gray — darkness is a color choice, not gloom.
+   - If night_style is "colored": keep the character fully visible in flat stylized color, just
+     shift the palette to a cooler, darker flat tone (deep blues/purples with warm firelight or
+     moonlight accents) instead of the bright daylight palette. Do not desaturate to gray —
+     darkness is a color choice, not gloom.
    Apply this same choice consistently across every dark scene in this story — don't mix modes.
-4. If a scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
-   human figures with natural but stylized flat color — skin tone, hair, simple period-appropriate
-   clothing — fully visible and colorful against a vividly colored, flat-painted daylight background.
-5. State which lighting mode you chose at the start of the enhanced prompt (e.g. "Night scene,
-   black silhouette figures..." / "Night scene, fully colored figures in cool blue palette..." or
-   "Bright daylight scene, fully colored figures...") so it's unambiguous to the renderer.
-6. Add specific visual detail: character pose, gesture, composition framing, background elements
+5. If a scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
+   character fully visible and colorful against a vividly colored, flat-painted daylight background.
+6. Add specific visual detail: pose, gesture, composition framing, background elements
    appropriate to the scene's specific moment — not generic.
-7. Reference the main character, setting, and props from the STORY BRIEF where relevant, and dress
-   characters in clothing/gear appropriate to the story's time period (never modern clothing unless
-   the STORY BRIEF is explicitly set in modern times).
+7. Reference the setting and props from the STORY BRIEF where relevant.
 8. If the scene includes animals, render them in the same lighting mode (silhouette or colored) as
    the rest of that scene — not photorealistic.
 9. Keep each enhanced prompt under 80 words.
@@ -301,12 +289,20 @@ def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
     full_prompt=(
         f"{AESTHETIC_ANCHOR} | "
         f"{brief_anchor} | "
-        f"{NEGATIVE_BAN} | "
+        f"Avoid: {NEGATIVE_BAN} | "
         f"Current Scene: {enhanced_prompt}"
     )
     if len(full_prompt) > MAX_PROMPT_CHARS:
-        print(f"[!] Prompt too long ({len(full_prompt)} chars) — truncating to {MAX_PROMPT_CHARS}.")
-        full_prompt=full_prompt[:MAX_PROMPT_CHARS]
+        # Trim from the middle of "Current Scene" rather than blindly slicing
+        # the whole assembled string — that used to risk cutting off the
+        # negative-prompt list or the scene action itself, whichever happened
+        # to fall past the cutoff.
+        overflow=len(full_prompt) - MAX_PROMPT_CHARS
+        print(f"[!] Prompt too long ({len(full_prompt)} chars) — trimming {overflow} chars from the scene description.")
+        static_part=full_prompt[:full_prompt.rfind("Current Scene:") + len("Current Scene: ")]
+        scene_part=full_prompt[len(static_part):]
+        budget=MAX_PROMPT_CHARS - len(static_part)
+        full_prompt=static_part + scene_part[:max(budget, 0)]
     return full_prompt
 
 
@@ -340,6 +336,38 @@ def get_cloudflare_credentials():
 CREDENTIALS_POOL = get_cloudflare_credentials()
 
 
+def _extract_image_bytes(response: requests.Response) -> bytes:
+    """
+    Cloudflare's REST endpoint for image models returns JSON —
+    {"result": {"image": "<base64>"}, "success": true, ...} — NOT raw image
+    bytes, even though the response "looked like" it could be saved directly.
+    Writing response.content straight to a .jpg (the old behavior) silently
+    produced a JSON text file with a .jpg extension: it "succeeded" and saved
+    something, but nothing could actually open it as an image. This inspects
+    the content-type and only treats the response as raw binary if it
+    actually is one — otherwise it decodes the base64 payload.
+    """
+    content_type=response.headers.get("Content-Type", "")
+
+    if "application/json" in content_type or response.content.lstrip()[:1] in (b"{", b"["):
+        try:
+            data=response.json()
+        except ValueError as e:
+            raise ValueError(f"response labeled JSON but didn't parse: {e}")
+
+        b64=None
+        if isinstance(data, dict):
+            b64=(data.get("result") or {}).get("image") if isinstance(data.get("result"), dict) else None
+            b64=b64 or data.get("image")
+        if not b64:
+            raise ValueError(f"no 'image' field found in JSON response: {str(data)[:200]}")
+
+        return base64.b64decode(b64)
+
+    # Some models/configurations do return raw binary directly — use as-is.
+    return response.content
+
+
 def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: str, max_retries: int = 5) -> bool:
     if not CREDENTIALS_POOL:
         print("[X] No Cloudflare credentials found in .env (Check CLOUDFLARE_API_KEY_1 / CLOUDFLARE_ACC_ID_1 etc.)")
@@ -367,7 +395,7 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
             "Content-Type": "application/json"
         }
 
-        print(f"[*] [Account {idx}] Attempting scene render via Leonardo with key ending in ...{api_key[-4:]}")
+        print(f"[*] [Account {idx}] Attempting scene render with key ending in ...{api_key[-4:]}")
         wait_time = 4.0
         account_failed = False
         account_exhausted = False
@@ -407,7 +435,12 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     account_failed = True
                     break
 
-                image_bytes = response.content
+                try:
+                    image_bytes=_extract_image_bytes(response)
+                except ValueError as e:
+                    print(f"[X] Account {idx} returned a response we couldn't decode as an image: {e}")
+                    account_failed = True
+                    break
 
                 with open(output_path, "wb") as f:
                     f.write(image_bytes)
@@ -436,13 +469,6 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
 
 
 def run(project_path: str):
-    """
-    Core image-generation stage, reusable from the master pipeline.
-    For every scene: enhances the visual_prompt in batches (Gemini -> Groq),
-    then renders one image per scene via Cloudflare Workers AI.
-    Resumable — scenes with an existing rendered image are skipped, which
-    also skips their enhancement batch call if the whole batch is done.
-    """
     json_path=os.path.join(project_path, "video_package.json")
     images_dir=os.path.join(project_path, "scene_images")
     os.makedirs(images_dir, exist_ok=True)
@@ -461,7 +487,8 @@ def run(project_path: str):
     total_scenes=len(scenes)
 
     if not brief:
-        print("[!] Warning: no brief found in video_package.json — character/setting context will be missing.")
+        print("[!] Warning: no brief found in video_package.json — setting/prop context will be missing "
+              "(character design still applies from pipeline_config.py).")
 
     has_state_tags=any(s.get("location") or s.get("established_facts") for s in scenes)
     if not has_state_tags:
@@ -478,7 +505,6 @@ def run(project_path: str):
 
     print(f"\n[*] Project   : {os.path.basename(project_path)}")
     print(f"[*] Concept   : {story_concept}")
-    print(f"[*] Character : {brief.get('main_character', 'N/A')}")
     print(f"[*] Setting   : {brief.get('setting', 'N/A')}")
     print(f"[*] Scenes    : {total_scenes}")
     print(f"[*] Batch size: {BATCH_SIZE} scenes per call")

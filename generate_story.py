@@ -7,11 +7,21 @@ from google import genai
 from groq import Groq
 from dotenv import load_dotenv
 
+from pipeline_config import CHARACTER_DESIGN
+
 load_dotenv()
 
 BASE_DIR=r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR=os.path.join(BASE_DIR, "outputs")
 VISUAL_BATCH_SIZE=12
+
+# Similarity threshold used when deduping near-identical scenes. Lowered from
+# 0.92 -> 0.82: at 0.92 only near-verbatim duplicates got caught, which is why
+# paraphrased-but-repetitive lines ("they cared deeply about X" / "X mattered
+# a great deal to them") were slipping through. Tune down further (e.g. 0.75)
+# if repeats still get through; tune up if it starts dropping genuinely
+# distinct short sentences.
+SCENE_DEDUPE_THRESHOLD=0.82
 
 
 def create_project_folder(concept_name: str) -> str:
@@ -44,12 +54,16 @@ Then produce a compact story brief.
 
 STORYTELLING RULES & FORMAT
 ---------------------------
-- TONE: Visceral, intense, dark, academic yet deeply engaging. 
+- TONE: Visceral, intense, dark, academic yet deeply engaging.
 - PERSPECTIVE: Write predominantly in the second person ("You") to force the viewer into the environment immediately.
 - STYLE: Use punchy, short, sharp sentences. Avoid flowery corporate transitions, marketing buzzwords, or introductory filler.
 - DATA GROUNDING: Integrate concrete biological facts, anatomical mechanics, weapons, or archaeological milestones.
 - CHARACTER CAP: Do not invent individual heroes, dialogue, or personal names. Speak of tribes, ancestors, or species.
-- Retain strict informational uniqueness. Every sentence must move the focus forward without looping back to restate prior points.
+- NO REPETITION: Every sentence must introduce a NEW fact, image, or beat. Never restate the same
+  point in different words (e.g. do not follow "they took shelter seriously" with "shelter mattered
+  deeply to them" a few lines later) — if you catch yourself circling back to something already said,
+  cut it and move the story forward instead. Each sentence should be something a reader could not
+  predict from the sentence before it.
 - Total word count MUST be between {min_words} and {max_words} words.
 
 OUTPUT FORMAT
@@ -61,7 +75,7 @@ or bullet points, just flowing narrative text inside the string value.
 
 {{
   "prose": "Full story as one plain text string.",
-  "brief": {{"main_character": "Short description of the main figure(s) in this story", "setting": "Where and when this story physically takes place", "visual_style": "Flat matte-paint / cutout animation style: clean thick outlines, solid flat color fills, simple flat-color backgrounds — think explainer-video paint style, not moody or photorealistic", "tone": "The emotional register of this story", "key_props": "Recurring objects/tools/weapons relevant to this story", "color_mood": "Decide the ACTUAL time of day and lighting for this specific story based on its content — do not default to night or dusk. If the story plausibly happens in daylight (e.g. daytime hunting, summer, midday activity), describe a bright, vividly colored daylight palette. If it genuinely happens at night, in a cave, or lit only by fire (e.g. this fire-discovery story), describe a palette lit by warm firelight or cool moonlight — but still flat and colorful, not desaturated or gloomy. Be specific and topic-appropriate, e.g. 'Bright warm midday sunlight, vivid greens and ochres, fully lit and colorful' or 'Deep blue night palette lit by warm orange firelight glow'.", "night_figure_style": "Decide, based on this specific story's tone and drama, how human figures should be rendered during night/cave/low-light scenes: either 'silhouette' (solid black silhouette figures against a colorful lit background — best for high-drama, primal, high-contrast moments) or 'colored' (figures stay fully visible in flat stylized color, just with a cooler/muted night palette instead of full daylight color — best for lighter, more explainer-style, less dramatic stories). Pick whichever suits THIS story, and use it consistently for every night/dark scene in the video. Respond with exactly the single word 'silhouette' or 'colored'."}}
+  "brief": {{"story_role": "Who/what this story is about in-world, e.g. 'a Neanderthal hunting party' or 'early Homo sapiens tribe' — narrative role only, NOT a visual/appearance description (visual design is fixed separately)", "setting": "Where and when this story physically takes place", "tone": "The emotional register of this story", "key_props": "Recurring objects/tools/weapons relevant to this story", "color_mood": "Decide the ACTUAL time of day and lighting for this specific story based on its content — do not default to night or dusk. If the story plausibly happens in daylight (e.g. daytime hunting, summer, midday activity), describe a bright, vividly colored daylight palette. If it genuinely happens at night, in a cave, or lit only by fire (e.g. this fire-discovery story), describe a palette lit by warm firelight or cool moonlight — but still flat and colorful, not desaturated or gloomy. Be specific and topic-appropriate, e.g. 'Bright warm midday sunlight, vivid greens and ochres, fully lit and colorful' or 'Deep blue night palette lit by warm orange firelight glow'.", "night_figure_style": "Decide, based on this specific story's tone and drama, how human figures should be rendered during night/cave/low-light scenes: either 'silhouette' (solid black silhouette figures against a colorful lit background — best for high-drama, primal, high-contrast moments) or 'colored' (figures stay fully visible in flat stylized color, just with a cooler/muted night palette instead of full daylight color — best for lighter, more explainer-style, less dramatic stories). Pick whichever suits THIS story, and use it consistently for every night/dark scene in the video. Respond with exactly the single word 'silhouette' or 'colored'."}}
 }}
 """
 
@@ -78,16 +92,20 @@ def _parse_prose_response(raw: str) -> tuple[str, dict]:
         prose=str(prose)
     if not isinstance(brief, dict):
         raise ValueError("Response JSON's 'brief' field was not an object.")
+
+    # Keep the narrative role (LLM-authored, e.g. "a Neanderthal hunting party")
+    # separate from the fixed visual design. CHARACTER_DESIGN is injected once,
+    # downstream, at final render time (via pipeline_config) — storing it again
+    # here would mean it gets duplicated into every render prompt on top of
+    # that, which is exactly what blew the prompt length up to ~3800 chars.
+    brief["character_role"]=brief.pop("story_role", "an ancient human")
+
     return prose.strip(), brief
 
 
 def generate_prose(topic: str, target_minutes: float, groq_client: Groq, gemini_client) -> tuple[str, dict]:
     prompt=_prose_prompt(topic, target_minutes)
     target_words=int(target_minutes * 140)
-    # Rough budget: ~1.4 tokens/word for the prose itself, plus headroom for the
-    # brief object and JSON overhead, plus general safety margin so a long story
-    # doesn't get silently truncated mid-JSON (which used to break parsing with
-    # no clear signal as to why).
     max_tokens=min(16000, int(target_words * 2.2) + 1200)
     print(f"\n[+] Generating prose story (~{target_words} words) …")
 
@@ -143,22 +161,6 @@ def chunk_prose(prose: str, sentences_per_scene: int=2) -> list[str]:
 
 
 # ── Step 3: batched visual prompts (WITH persistent world-state tracking) ─
-#
-# The single biggest source of context-drift bugs (fire appearing before
-# it's discovered, characters silently teleporting out of a cave, etc.) is
-# that each batch of chunks used to be enhanced in isolation. There was no
-# hard record of "what is currently true about the physical world" that
-# carried from one batch to the next — the model had to re-infer it from
-# scratch every time, and LLMs are bad at silently inferring "no change
-# happened" over a sliding window. So now every batch call:
-#   1. Receives an explicit `world_state` block describing the CONFIRMED
-#      state as of the end of the previous batch (location / lighting /
-#      established facts like "fire not yet discovered").
-#   2. Must return that same state for every chunk, unless the chunk's own
-#      text explicitly narrates a change.
-#   3. Whatever the LAST chunk in the batch ends up with becomes the seed
-#      state for the NEXT batch. This makes state a running variable
-#      instead of something re-guessed per batch.
 
 def _visual_batch_prompt(
     brief: dict,
@@ -173,11 +175,11 @@ You are a storyboard artist for a minimalist YouTube animation.
 
 STORY BRIEF
 -----------
-Character : {brief['main_character']}
-Setting   : {brief['setting']}
-Style     : {brief['visual_style']}
-Tone      : {brief['tone']}
-Key props : {brief['key_props']}
+Character appearance : {CHARACTER_DESIGN}
+Character's role here: {brief['character_role']}
+Setting               : {brief['setting']}
+Tone                  : {brief['tone']}
+Key props             : {brief['key_props']}
 
 FULL STORY (for context on low-context sentences)
 -----------
@@ -201,7 +203,7 @@ text saying so.
 TASK
 ----
 For each numbered chunk below, produce ONE storyboard entry describing a single
-minimalist stickman cartoon panel. For each entry:
+minimalist cartoon panel. For each entry:
 - First decide whether this chunk changes the location, lighting, or any
   established fact. If not, repeat the CONFIRMED WORLD STATE values exactly.
 - If it does change, state the NEW location/lighting/established_facts clearly
@@ -230,14 +232,6 @@ Return ONLY a valid JSON array, same order as the chunks, no extra keys, no mark
 
 
 def _normalize_visual_items(result: list, batch: list[str], fallback_state: dict) -> list[dict]:
-    """
-    Defensively extracts a full {location, lighting, established_facts,
-    visual_prompt} item from each entry, regardless of exact key names the
-    LLM used, and regardless of whether it returned a plain string instead
-    of a dict. Missing state fields fall back to the last confirmed state
-    (fallback_state) rather than a blank string, so a malformed single
-    entry can't silently reset/erase continuity for everything after it.
-    """
     normalized=[]
     for item in result:
         if isinstance(item, dict):
@@ -246,7 +240,7 @@ def _normalize_visual_items(result: list, batch: list[str], fallback_state: dict
                 or item.get("prompt")
                 or item.get("description")
                 or item.get("text")
-                or "Stickman stands still in a minimalist scene."
+                or "Character stands still in a minimalist scene."
             )
             normalized.append({
                 "location": item.get("location") or fallback_state["location"],
@@ -267,16 +261,15 @@ def _normalize_visual_items(result: list, batch: list[str], fallback_state: dict
                 "location": fallback_state["location"],
                 "lighting": fallback_state["lighting"],
                 "established_facts": fallback_state["established_facts"],
-                "visual_prompt": "Stickman stands still in a minimalist scene.",
+                "visual_prompt": "Character stands still in a minimalist scene.",
             })
 
-    # pad if the model returned fewer entries than requested, carrying state forward
     for i in range(len(normalized), len(batch)):
         normalized.append({
             "location": fallback_state["location"],
             "lighting": fallback_state["lighting"],
             "established_facts": fallback_state["established_facts"],
-            "visual_prompt": "Stickman stands still in a minimalist scene.",
+            "visual_prompt": "Character stands still in a minimalist scene.",
         })
 
     return normalized[:len(batch)]
@@ -346,7 +339,6 @@ def generate_visual_prompts(
         items=_normalize_visual_items(result, batch, current_state)
         all_items.extend(items)
 
-        # carry the last chunk's confirmed state forward into the next batch
         current_state={
             "location": items[-1]["location"],
             "lighting": items[-1]["lighting"],
@@ -369,7 +361,7 @@ def _jaccard(a: str, b: str) -> float:
     return len(a_words & b_words) / len(a_words | b_words)
 
 
-def build_scenes(chunks: list[str], visual_items: list[dict], similarity_threshold: float=0.85) -> list[dict]:
+def build_scenes(chunks: list[str], visual_items: list[dict], similarity_threshold: float=SCENE_DEDUPE_THRESHOLD) -> list[dict]:
     raw=[]
     for narrative, item in zip(chunks, visual_items):
         raw.append({
@@ -390,7 +382,7 @@ def build_scenes(chunks: list[str], visual_items: list[dict], similarity_thresho
         )
         if is_dup:
             removed += 1
-            print(f"[~] Duplicate dropped (index {i}): \"{scene['narrative'][:60]}…\"")
+            print(f"[~] Duplicate/near-duplicate dropped (index {i}): \"{scene['narrative'][:60]}…\"")
             continue
 
         decorated.append({
@@ -405,7 +397,8 @@ def build_scenes(chunks: list[str], visual_items: list[dict], similarity_thresho
             "audio_file": "",
         })
 
-    print(f"[✓] Scenes built — {len(decorated)} kept, {removed} duplicate(s) dropped.")
+    print(f"[✓] Scenes built — {len(decorated)} kept, {removed} duplicate(s) dropped "
+          f"(threshold={similarity_threshold}).")
     return decorated
 
 
@@ -433,7 +426,7 @@ Return ONLY valid JSON — no markdown, no preamble.
   ],
   "seo_description": "A comprehensive hook-first description (150-300 words) summarising the video and encouraging viewers to watch.",
   "tags": ["relevant", "seo", "tags", "storytime", "animation"],
-  "thumbnail_concept": "A split-screen minimalist stickman cartoon scene capturing the most dramatic moment of the story."
+  "thumbnail_concept": "A split-screen minimalist cartoon scene capturing the most dramatic moment of the story."
 }}
 """
 
@@ -481,7 +474,7 @@ def generate_pipeline(topic: str, target_minutes: float) -> dict:
     prose, brief=generate_prose(topic, target_minutes, groq_client, gemini_client)
     chunks=chunk_prose(prose, sentences_per_scene=1)
     visual_items=generate_visual_prompts(chunks, brief, prose, groq_client, gemini_client)
-    scenes=build_scenes(chunks, visual_items, similarity_threshold=0.92)
+    scenes=build_scenes(chunks, visual_items)
     metadata=generate_metadata(topic, scenes, gemini_client, groq_client)
 
     return {
