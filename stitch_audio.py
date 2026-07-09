@@ -9,8 +9,8 @@ BASE_DIR = r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
 # --- PACING CONTROLS (Change these numbers to adjust the silences) ---
-MIN_GAP = 0.2   # Minimum silence in seconds
-MAX_GAP = 0.35  # Maximum silence in seconds
+MIN_GAP = 0.1   # Minimum silence in seconds
+MAX_GAP = 0.2  # Maximum silence in seconds
 
 # Explicitly link FFmpeg binaries
 FFMPEG_PATH = r"D:\ffmpeg\bin"

@@ -54,30 +54,41 @@ STORYTELLING RULES & FORMAT
 
 OUTPUT FORMAT
 -------------
-Return your response using EXACTLY these two delimiters, nothing else outside them.
+Return ONLY a single valid JSON object — no markdown fences, no commentary, no text
+outside the JSON. The "prose" field must contain the ENTIRE story as one plain text
+string (use \\n\\n between paragraphs if you want breaks). Do not nest prose as JSON
+or bullet points, just flowing narrative text inside the string value.
 
-<PROSE>
-Full story as plain flowing text. No JSON, no bullet points.
-</PROSE>
-<BRIEF>
-{{"main_character": "Short description of the main figure(s) in this story", "setting": "Where and when this story physically takes place", "visual_style": "Cinematic vector-art illustration style, graphic-novel look", "tone": "The emotional register of this story", "key_props": "Recurring objects/tools/weapons relevant to this story", "color_mood": "Decide the ACTUAL time of day and lighting for this specific story based on its content — do not default to night or dusk. If the story plausibly happens in daylight (e.g. daytime hunting, summer, midday activity), describe a bright, vividly colored daylight palette. If it genuinely happens at night, in a cave, or lit only by fire (e.g. this fire-discovery story), describe a dark palette lit by warm firelight or cool moonlight. Be specific and topic-appropriate, e.g. 'Bright warm midday sunlight, vivid greens and ochres, fully lit and colorful' or 'Deep night lit only by flickering firelight, warm orange glow against black silhouettes'."}}
-</BRIEF>
+{{
+  "prose": "Full story as one plain text string.",
+  "brief": {{"main_character": "Short description of the main figure(s) in this story", "setting": "Where and when this story physically takes place", "visual_style": "Flat matte-paint / cutout animation style: clean thick outlines, solid flat color fills, simple flat-color backgrounds — think explainer-video paint style, not moody or photorealistic", "tone": "The emotional register of this story", "key_props": "Recurring objects/tools/weapons relevant to this story", "color_mood": "Decide the ACTUAL time of day and lighting for this specific story based on its content — do not default to night or dusk. If the story plausibly happens in daylight (e.g. daytime hunting, summer, midday activity), describe a bright, vividly colored daylight palette. If it genuinely happens at night, in a cave, or lit only by fire (e.g. this fire-discovery story), describe a palette lit by warm firelight or cool moonlight — but still flat and colorful, not desaturated or gloomy. Be specific and topic-appropriate, e.g. 'Bright warm midday sunlight, vivid greens and ochres, fully lit and colorful' or 'Deep blue night palette lit by warm orange firelight glow'.", "night_figure_style": "Decide, based on this specific story's tone and drama, how human figures should be rendered during night/cave/low-light scenes: either 'silhouette' (solid black silhouette figures against a colorful lit background — best for high-drama, primal, high-contrast moments) or 'colored' (figures stay fully visible in flat stylized color, just with a cooler/muted night palette instead of full daylight color — best for lighter, more explainer-style, less dramatic stories). Pick whichever suits THIS story, and use it consistently for every night/dark scene in the video. Respond with exactly the single word 'silhouette' or 'colored'."}}
+}}
 """
 
 
 def _parse_prose_response(raw: str) -> tuple[str, dict]:
-    prose_match=re.search(r"<PROSE>(.*?)</PROSE>", raw, re.DOTALL)
-    brief_match=re.search(r"<BRIEF>(.*?)</BRIEF>", raw, re.DOTALL)
-    if not prose_match or not brief_match:
-        raise ValueError("Response missing <PROSE> or <BRIEF> delimiters.")
-    prose=prose_match.group(1).strip()
-    brief=json.loads(brief_match.group(1).strip())
-    return prose, brief
+    data=_parse_json(raw)
+    if not isinstance(data, dict):
+        raise ValueError("Response JSON was not an object with 'prose' and 'brief' keys.")
+    prose=data.get("prose")
+    brief=data.get("brief")
+    if not prose or not brief:
+        raise ValueError("Response JSON is missing 'prose' or 'brief' keys.")
+    if not isinstance(prose, str):
+        prose=str(prose)
+    if not isinstance(brief, dict):
+        raise ValueError("Response JSON's 'brief' field was not an object.")
+    return prose.strip(), brief
 
 
 def generate_prose(topic: str, target_minutes: float, groq_client: Groq, gemini_client) -> tuple[str, dict]:
     prompt=_prose_prompt(topic, target_minutes)
     target_words=int(target_minutes * 140)
+    # Rough budget: ~1.4 tokens/word for the prose itself, plus headroom for the
+    # brief object and JSON overhead, plus general safety margin so a long story
+    # doesn't get silently truncated mid-JSON (which used to break parsing with
+    # no clear signal as to why).
+    max_tokens=min(16000, int(target_words * 2.2) + 1200)
     print(f"\n[+] Generating prose story (~{target_words} words) …")
 
     try:
@@ -85,8 +96,13 @@ def generate_prose(topic: str, target_minutes: float, groq_client: Groq, gemini_
         resp=groq_client.chat.completions.create(
             model=os.environ["GROQ_MODEL"],
             messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
             temperature=0.5,
+            max_tokens=max_tokens,
         )
+        finish_reason=resp.choices[0].finish_reason
+        if finish_reason == "length":
+            print(f"[!] Groq prose response was truncated (finish_reason=length, max_tokens={max_tokens}).")
         prose, brief=_parse_prose_response(resp.choices[0].message.content)
         print(f"[✓] Groq prose done — {len(prose.split())} words.")
         return prose, brief
@@ -99,6 +115,7 @@ def generate_prose(topic: str, target_minutes: float, groq_client: Groq, gemini_
         resp=gemini_client.models.generate_content(
             model=os.environ["GEMINI_MODEL"],
             contents=prompt,
+            config={"response_mime_type": "application/json", "max_output_tokens": max_tokens},
         )
         prose, brief=_parse_prose_response(resp.text)
         print(f"[✓] Gemini prose fallback done — {len(prose.split())} words.")
@@ -125,9 +142,30 @@ def chunk_prose(prose: str, sentences_per_scene: int=2) -> list[str]:
     return chunks
 
 
-# ── Step 3: batched visual prompts ────────────────────────────────────────
+# ── Step 3: batched visual prompts (WITH persistent world-state tracking) ─
+#
+# The single biggest source of context-drift bugs (fire appearing before
+# it's discovered, characters silently teleporting out of a cave, etc.) is
+# that each batch of chunks used to be enhanced in isolation. There was no
+# hard record of "what is currently true about the physical world" that
+# carried from one batch to the next — the model had to re-infer it from
+# scratch every time, and LLMs are bad at silently inferring "no change
+# happened" over a sliding window. So now every batch call:
+#   1. Receives an explicit `world_state` block describing the CONFIRMED
+#      state as of the end of the previous batch (location / lighting /
+#      established facts like "fire not yet discovered").
+#   2. Must return that same state for every chunk, unless the chunk's own
+#      text explicitly narrates a change.
+#   3. Whatever the LAST chunk in the batch ends up with becomes the seed
+#      state for the NEXT batch. This makes state a running variable
+#      instead of something re-guessed per batch.
 
-def _visual_batch_prompt(brief: dict, prose: str, numbered_chunks: list[tuple[int, str]]) -> str:
+def _visual_batch_prompt(
+    brief: dict,
+    prose: str,
+    numbered_chunks: list[tuple[int, str]],
+    world_state: dict,
+) -> str:
     chunks_text="\n".join(f"{i}. \"{chunk}\"" for i, chunk in numbered_chunks)
 
     return f"""
@@ -145,14 +183,32 @@ FULL STORY (for context on low-context sentences)
 -----------
 {prose}
 
+CONFIRMED WORLD STATE — as of the end of the previous batch
+-------------------------------------------------------------
+Location           : {world_state['location']}
+Lighting            : {world_state['lighting']}
+Established facts   : {world_state['established_facts']}
+
+This state is GROUND TRUTH. Carry it forward UNCHANGED into every chunk below
+unless that chunk's own text explicitly narrates a change (e.g. "they left the
+cave", "the flame finally caught", "they now had spears"). Do not silently drop
+or reverse an established fact just because a chunk doesn't repeat it — absence
+of a mention is NOT evidence of change. Common failure to avoid: showing fire,
+tools, or clothing that "established_facts" says do not exist yet; or moving
+characters out of an enclosed setting (cave, shelter) into the open without the
+text saying so.
+
 TASK
 ----
-For each numbered chunk below, write exactly one "visual_prompt".
-Each visual_prompt must:
-- Describe a single minimalist stickman cartoon panel.
-- Be specific to THAT chunk's moment — not generic.
-- Reference the character, setting, or props from the brief where relevant.
-- Be one sentence only.
+For each numbered chunk below, produce ONE storyboard entry describing a single
+minimalist stickman cartoon panel. For each entry:
+- First decide whether this chunk changes the location, lighting, or any
+  established fact. If not, repeat the CONFIRMED WORLD STATE values exactly.
+- If it does change, state the NEW location/lighting/established_facts clearly
+  and concisely — this becomes the new ground truth for future chunks.
+- Then write a visual_prompt: one sentence, specific to THAT chunk's moment,
+  referencing the character/setting/props from the brief where relevant, and
+  consistent with the location/lighting you just decided.
 
 CHUNKS TO ILLUSTRATE
 --------------------
@@ -160,42 +216,70 @@ CHUNKS TO ILLUSTRATE
 
 OUTPUT FORMAT
 -------------
-Return ONLY a valid JSON array in the same order as the chunks. No extra keys.
+Return ONLY a valid JSON array, same order as the chunks, no extra keys, no markdown:
 
 [
-  {{"visual_prompt": "..."}},
-  {{"visual_prompt": "..."}}
+  {{
+    "location": "concise current physical setting, e.g. 'inside a shallow rock cave'",
+    "lighting": "concise lighting descriptor, e.g. 'pitch dark, only moonlight at the cave mouth'",
+    "established_facts": "comma-separated list of story-critical facts still true right now, e.g. 'fire not yet discovered, only stone tools, tribe still nomadic'",
+    "visual_prompt": "..."
+  }}
 ]
 """
 
 
-def _normalize_visual_prompts(result: list) -> list[str]:
+def _normalize_visual_items(result: list, batch: list[str], fallback_state: dict) -> list[dict]:
     """
-    Defensively extracts a visual_prompt string from each item, regardless
-    of whether the LLM returned {"visual_prompt": "..."}, a plain string,
-    or some other dict shape with the text under a different key. This is
-    what prevents a single malformed batch from KeyError-crashing the
-    entire pipeline after other batches already succeeded.
+    Defensively extracts a full {location, lighting, established_facts,
+    visual_prompt} item from each entry, regardless of exact key names the
+    LLM used, and regardless of whether it returned a plain string instead
+    of a dict. Missing state fields fall back to the last confirmed state
+    (fallback_state) rather than a blank string, so a malformed single
+    entry can't silently reset/erase continuity for everything after it.
     """
     normalized=[]
     for item in result:
-        if isinstance(item, str):
-            normalized.append(item)
-        elif isinstance(item, dict):
-            text=(
+        if isinstance(item, dict):
+            visual_prompt=(
                 item.get("visual_prompt")
                 or item.get("prompt")
                 or item.get("description")
                 or item.get("text")
+                or "Stickman stands still in a minimalist scene."
             )
-            if text:
-                normalized.append(str(text))
-            else:
-                print(f"[!] Unexpected dict shape in visual prompt batch, no known text key found: {item}")
-                normalized.append("Stickman stands still in a minimalist scene.")
+            normalized.append({
+                "location": item.get("location") or fallback_state["location"],
+                "lighting": item.get("lighting") or fallback_state["lighting"],
+                "established_facts": item.get("established_facts") or fallback_state["established_facts"],
+                "visual_prompt": str(visual_prompt),
+            })
+        elif isinstance(item, str):
+            normalized.append({
+                "location": fallback_state["location"],
+                "lighting": fallback_state["lighting"],
+                "established_facts": fallback_state["established_facts"],
+                "visual_prompt": item,
+            })
         else:
-            normalized.append(str(item))
-    return normalized
+            print(f"[!] Unexpected item shape in visual prompt batch: {item}")
+            normalized.append({
+                "location": fallback_state["location"],
+                "lighting": fallback_state["lighting"],
+                "established_facts": fallback_state["established_facts"],
+                "visual_prompt": "Stickman stands still in a minimalist scene.",
+            })
+
+    # pad if the model returned fewer entries than requested, carrying state forward
+    for i in range(len(normalized), len(batch)):
+        normalized.append({
+            "location": fallback_state["location"],
+            "lighting": fallback_state["lighting"],
+            "established_facts": fallback_state["established_facts"],
+            "visual_prompt": "Stickman stands still in a minimalist scene.",
+        })
+
+    return normalized[:len(batch)]
 
 
 def generate_visual_prompts(
@@ -204,19 +288,27 @@ def generate_visual_prompts(
     prose: str,
     groq_client: Groq,
     gemini_client,
-) -> list[str]:
-    print(f"\n[+] Generating visual prompts in batches of {VISUAL_BATCH_SIZE} …")
-    all_prompts=[]
+) -> list[dict]:
+    print(f"\n[+] Generating visual prompts in batches of {VISUAL_BATCH_SIZE} (with world-state tracking) …")
+    all_items: list[dict]=[]
     total_batches=((len(chunks) - 1) // VISUAL_BATCH_SIZE) + 1
+
+    current_state={
+        "location": brief.get("setting", "Unspecified setting"),
+        "lighting": brief.get("color_mood", "Natural lighting appropriate to the scene"),
+        "established_facts": "None established yet — infer sensibly from the opening of the story and the brief.",
+    }
 
     for batch_idx in range(total_batches):
         start=batch_idx * VISUAL_BATCH_SIZE
         end=start + VISUAL_BATCH_SIZE
         batch=chunks[start:end]
         numbered=[(start + i + 1, chunk) for i, chunk in enumerate(batch)]
-        prompt=_visual_batch_prompt(brief, prose, numbered)
+        prompt=_visual_batch_prompt(brief, prose, numbered, current_state)
 
         print(f"[*] Batch {batch_idx + 1}/{total_batches} — chunks {start + 1}–{start + len(batch)} …")
+        print(f"    (entering with state: location='{current_state['location']}', "
+              f"facts='{current_state['established_facts'][:80]}')")
 
         result=None
 
@@ -251,16 +343,20 @@ def generate_visual_prompts(
             except Exception as e2:
                 raise RuntimeError(f"Both failed for visual batch {batch_idx + 1}: {e2}")
 
-        prompts=_normalize_visual_prompts(result)
+        items=_normalize_visual_items(result, batch, current_state)
+        all_items.extend(items)
 
-        if len(prompts) < len(batch):
-            prompts += ["Stickman stands still in a minimalist scene."] * (len(batch) - len(prompts))
-        prompts=prompts[:len(batch)]
+        # carry the last chunk's confirmed state forward into the next batch
+        current_state={
+            "location": items[-1]["location"],
+            "lighting": items[-1]["lighting"],
+            "established_facts": items[-1]["established_facts"],
+        }
 
-        all_prompts.extend(prompts)
-        print(f"[✓] Batch {batch_idx + 1} done — {len(prompts)} prompts.")
+        print(f"[✓] Batch {batch_idx + 1} done — {len(items)} prompts. "
+              f"Exiting state: location='{current_state['location']}'")
 
-    return all_prompts
+    return all_items
 
 
 # ── Step 4: merge + decorate ──────────────────────────────────────────────
@@ -273,10 +369,16 @@ def _jaccard(a: str, b: str) -> float:
     return len(a_words & b_words) / len(a_words | b_words)
 
 
-def build_scenes(chunks: list[str], visual_prompts: list[str], similarity_threshold: float=0.85) -> list[dict]:
+def build_scenes(chunks: list[str], visual_items: list[dict], similarity_threshold: float=0.85) -> list[dict]:
     raw=[]
-    for narrative, visual_prompt in zip(chunks, visual_prompts):
-        raw.append({"narrative": narrative, "visual_prompt": visual_prompt})
+    for narrative, item in zip(chunks, visual_items):
+        raw.append({
+            "narrative": narrative,
+            "visual_prompt": item.get("visual_prompt", ""),
+            "location": item.get("location", ""),
+            "lighting": item.get("lighting", ""),
+            "established_facts": item.get("established_facts", ""),
+        })
 
     decorated=[]
     removed=0
@@ -295,6 +397,9 @@ def build_scenes(chunks: list[str], visual_prompts: list[str], similarity_thresh
             "sequence": len(decorated) + 1,
             "narrative": scene["narrative"],
             "visual_prompt": scene["visual_prompt"],
+            "location": scene["location"],
+            "lighting": scene["lighting"],
+            "established_facts": scene["established_facts"],
             "start_time": 0.0,
             "end_time": 0.0,
             "audio_file": "",
@@ -375,8 +480,8 @@ def generate_pipeline(topic: str, target_minutes: float) -> dict:
 
     prose, brief=generate_prose(topic, target_minutes, groq_client, gemini_client)
     chunks=chunk_prose(prose, sentences_per_scene=1)
-    visual_prompts=generate_visual_prompts(chunks, brief, prose, groq_client, gemini_client)
-    scenes=build_scenes(chunks, visual_prompts, similarity_threshold=0.92)
+    visual_items=generate_visual_prompts(chunks, brief, prose, groq_client, gemini_client)
+    scenes=build_scenes(chunks, visual_items, similarity_threshold=0.92)
     metadata=generate_metadata(topic, scenes, gemini_client, groq_client)
 
     return {

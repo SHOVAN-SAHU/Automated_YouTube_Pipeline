@@ -22,13 +22,16 @@ IMAGE_WIDTH=1920        # YouTube 16:9 widescreen
 IMAGE_HEIGHT=1080       # YouTube 16:9 widescreen
 
 AESTHETIC_ANCHOR = (
-    "Cinematic flat vector-art illustration style for a history documentary — crisp clean outlines, "
-    "confident shapes, a stylized graphic-novel look, not photorealistic. Rich, vivid color grading that "
-    "matches the ACTUAL time of day and lighting of each specific scene: warm saturated colors (blues, "
-    "greens, ochres) for daylight scenes with fully visible, naturally colored figures, versus a dark "
-    "palette lit by warm firelight or cool moonlight for night scenes with solid black silhouette figures. "
-    "Never a flat gray, desaturated, or washed-out look regardless of time of day. Strong dramatic lighting "
-    "and shadow work in every scene. Widescreen cinematic composition."
+    "Flat matte-paint / cutout animation style for a history explainer video — clean thick uniform-width "
+    "outlines, confident simple shapes, solid FLAT color fills with little to no gradient or texture, "
+    "stylized paper-cutout look, not photorealistic and not moody/gritty by default. Backgrounds are simple "
+    "flat color blocks (a solid sky, a solid ground plane, minimal flat scenery shapes) rather than dark, "
+    "heavily textured, or atmospheric renders. Color and brightness should follow the ACTUAL time of day and "
+    "lighting of each specific scene: vivid, warm, fully-lit flat colors (blues, greens, ochres, tans) for "
+    "daylight scenes, versus a cooler flat palette lit by warm firelight or cool moonlight accents for night "
+    "scenes — darkness should read as a color choice (deep flat blues/purples), not as gloom, low contrast, "
+    "or heavy shadow. Never a flat gray, desaturated, sepia, or washed-out look regardless of time of day. "
+    "Widescreen cinematic composition."
 )
 
 NEGATIVE_BAN = (
@@ -38,8 +41,8 @@ NEGATIVE_BAN = (
 )
 
 BATCH_SIZE=5
-WINDOW_BEFORE=2
-WINDOW_AFTER=2
+WINDOW_BEFORE=3
+WINDOW_AFTER=3
 
 
 def select_project_folder() -> str:
@@ -81,8 +84,46 @@ def _build_brief_anchor(brief: dict) -> str:
         f"Recurring props: {brief['key_props']}. "
         f"Mood/tone: {brief['tone']}. "
         f"Overall color & lighting mood for this story: "
-        f"{brief.get('color_mood', 'Naturally colored, matching the described setting and time of day.')}"
+        f"{brief.get('color_mood', 'Naturally colored, matching the described setting and time of day.')}. "
+        f"Night/low-light figure style for THIS story: {brief.get('night_figure_style', 'colored')}."
     )
+
+
+def _night_figure_style(brief: dict) -> str:
+    """
+    Whether human figures stay fully colored or go solid-black-silhouette during
+    night/cave/low-light scenes is now a per-story creative decision made once
+    in the brief (generate_story.py), not a hardcoded rule — different stories
+    call for different treatments. Defaults to 'colored' for older briefs that
+    predate this field, matching the flatter, less moody paint style.
+    """
+    style=str(brief.get("night_figure_style", "colored")).strip().lower()
+    return "silhouette" if style.startswith("silhouette") else "colored"
+
+
+def _fmt_scenes(scenes: list[dict], label: str) -> str:
+    """
+    Renders each scene along with its authoritative continuity tags —
+    location / lighting / established_facts — which were computed once,
+    sequentially, back in generate_story.py. These tags are ground truth:
+    they're far more reliable than asking the enhancer to re-infer world
+    state from a narrow ±N scene window of prompt text alone, which is
+    what used to cause fire/cave continuity breaks.
+    """
+    if not scenes:
+        return ""
+    lines=[f"\n[{label}]"]
+    for s in scenes:
+        tags=[]
+        if s.get("location"):
+            tags.append(f"Location: {s['location']}")
+        if s.get("lighting"):
+            tags.append(f"Lighting: {s['lighting']}")
+        if s.get("established_facts"):
+            tags.append(f"Established facts: {s['established_facts']}")
+        tag_str=f" [{' | '.join(tags)}]" if tags else ""
+        lines.append(f"  Scene {s['sequence']}{tag_str}: {s['visual_prompt']}")
+    return "\n".join(lines)
 
 
 def _build_enhance_prompt(
@@ -93,19 +134,12 @@ def _build_enhance_prompt(
     story_tone: str,
     brief: dict,
 ) -> str:
-    def fmt_scenes(scenes: list[dict], label: str) -> str:
-        if not scenes:
-            return ""
-        lines=[f"\n[{label}]"]
-        for s in scenes:
-            lines.append(f"  Scene {s['sequence']}: {s['visual_prompt']}")
-        return "\n".join(lines)
-
-    context_block=fmt_scenes(context_before, "PREVIOUS SCENES — for visual continuity")
-    target_block=fmt_scenes(batch, "TARGET SCENES — enhance these")
-    upcoming_block=fmt_scenes(context_after, "UPCOMING SCENES — for narrative awareness")
+    context_block=_fmt_scenes(context_before, "PREVIOUS SCENES — for visual continuity")
+    target_block=_fmt_scenes(batch, "TARGET SCENES — enhance these")
+    upcoming_block=_fmt_scenes(context_after, "UPCOMING SCENES — for narrative awareness")
     sequence_ids=[s["sequence"] for s in batch]
     brief_anchor=_build_brief_anchor(brief)
+    night_style=_night_figure_style(brief)
 
     return f"""
 You are a professional AI image prompt engineer specialising in minimalist stickman doodle animation for YouTube.
@@ -124,6 +158,23 @@ VISUAL STYLE (must be obeyed in every enhanced prompt)
 {AESTHETIC_ANCHOR}
 {NEGATIVE_BAN}
 
+CONTINUITY IS GROUND TRUTH
+--------------------------
+Every scene below (previous, target, and upcoming) is tagged with its authoritative
+Location / Lighting / Established facts, computed sequentially from the full story.
+Treat these tags as hard constraints, not suggestions:
+- If a TARGET scene's tag says "Established facts: fire not yet discovered", the
+  enhanced prompt must NOT contain fire, embers, torches, or any firelight — even if
+  a nearby scene in the window does have fire. Show the alternative implied by the
+  narrative (raw food, cold camp, moonlight/daylight only, etc.).
+- If a TARGET scene's Location tag says an enclosed setting (e.g. "inside a cave"),
+  keep that enclosed setting visible (rock walls, low ceiling, cave mouth) even if
+  the scene's own narrative sentence doesn't repeat the word "cave" — the tag is the
+  authority, not the sentence in isolation.
+- Only change location/lighting/established facts within your enhanced prompt if the
+  TARGET scene's own tag explicitly differs from the PREVIOUS scene's tag. Never
+  invent a location or prop change that isn't reflected in the tags.
+
 YOUR TASK
 ---------
 Rewrite ONLY the TARGET SCENES below into richer, more descriptive image generation prompts.
@@ -132,18 +183,24 @@ same character proportions, consistent lighting direction, consistent emotional 
 
 Rules:
 1. Keep the same narrative action as the original — do NOT invent new story events.
-2. For EACH target scene, first judge its actual lighting from the narrative text and the STORY
-   BRIEF's overall color mood (e.g. bright midday, dusk, deep night, firelit, cave interior).
-3. If the scene's lighting is dark/low-light (night, deep shadow, cave interior, backlit only by
-   fire or moonlight): render the human figures as solid black silhouettes with no visible color or
-   surface detail on the body itself, set against a colorful, lit background — e.g. warm orange
-   firelight glow, cool blue moonlight — never a flat gray/desaturated background.
-4. If the scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
-   human figures with natural but stylized color — skin tone, hair, simple period-appropriate
-   clothing — fully visible and colorful against a vividly colored daylight background.
+2. Use each TARGET scene's own Location / Lighting / Established facts tags as the primary
+   signal for how to render it, cross-checked against the STORY BRIEF's overall color mood.
+3. This story's NIGHT FIGURE STYLE is: "{night_style}". Apply it to every scene whose lighting
+   is dark/low-light (night, deep shadow, cave interior, backlit only by fire or moonlight):
+   - If night_style is "silhouette": render the human figures as solid black silhouettes with no
+     visible color or surface detail on the body itself, set against a colorful, lit flat-color
+     background — e.g. warm orange firelight glow, cool blue moonlight.
+   - If night_style is "colored": keep the human figures fully visible in flat stylized color
+     (skin tone, hair, simple period-appropriate clothing), just shift the palette to a cooler,
+     darker flat tone (deep blues/purples with warm firelight or moonlight accents) instead of the
+     bright daylight palette. Do not desaturate to gray — darkness is a color choice, not gloom.
+   Apply this same choice consistently across every dark scene in this story — don't mix modes.
+4. If a scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
+   human figures with natural but stylized flat color — skin tone, hair, simple period-appropriate
+   clothing — fully visible and colorful against a vividly colored, flat-painted daylight background.
 5. State which lighting mode you chose at the start of the enhanced prompt (e.g. "Night scene,
-   black silhouette figures..." or "Bright daylight scene, fully colored figures...") so it's
-   unambiguous to the renderer.
+   black silhouette figures..." / "Night scene, fully colored figures in cool blue palette..." or
+   "Bright daylight scene, fully colored figures...") so it's unambiguous to the renderer.
 6. Add specific visual detail: character pose, gesture, composition framing, background elements
    appropriate to the scene's specific moment — not generic.
 7. Reference the main character, setting, and props from the STORY BRIEF where relevant, and dress
@@ -406,6 +463,12 @@ def run(project_path: str):
     if not brief:
         print("[!] Warning: no brief found in video_package.json — character/setting context will be missing.")
 
+    has_state_tags=any(s.get("location") or s.get("established_facts") for s in scenes)
+    if not has_state_tags:
+        print("[!] This video_package.json predates continuity tags (location/lighting/established_facts). "
+              "Enhancement will fall back to the old ±window behaviour for this project — "
+              "regenerate the story stage for full continuity guarantees.")
+
     completed_sequences={
         scene["sequence"]
         for scene in scenes
@@ -471,6 +534,7 @@ def run(project_path: str):
             image_path=os.path.join(images_dir, image_name)
 
             print(f"\n[...] Rendering scene {seq}/{total_scenes}")
+            print(f"    Location : {scene.get('location', 'N/A')} | Lighting: {scene.get('lighting', 'N/A')}")
             print(f"    Original : {scene['visual_prompt'][:70]}…")
             print(f"    Enhanced : {enhanced_prompt[:70]}…")
 

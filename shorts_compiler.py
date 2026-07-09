@@ -1,8 +1,8 @@
 import os
 import json
 import re
+import glob
 import time
-import base64
 import requests
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
 
@@ -56,6 +56,17 @@ def slugify(text: str) -> str:
     sanitized = re.sub(r"\s+", "_", sanitized.strip())
     return sanitized or "short"
 
+def _night_figure_style(brief: dict) -> str:
+    """
+    Whether human figures stay fully colored or go solid-black-silhouette during
+    night/cave/low-light scenes is now a per-story creative decision made once
+    in the brief (generate_story.py), not a hardcoded rule — different stories
+    call for different treatments. Defaults to 'colored' for older briefs that
+    predate this field, matching the flatter, less moody paint style.
+    """
+    style=str(brief.get("night_figure_style", "colored")).strip().lower()
+    return "silhouette" if style.startswith("silhouette") else "colored"
+
 
 # MATCHED TO MAIN VIDEO STYLE: Includes color_mood tracking dynamically
 def _build_brief_anchor(brief: dict) -> str:
@@ -97,6 +108,7 @@ def _build_enhance_prompt_short(selected_scenes: list[dict], story_concept: str,
     scenes_block = "\n".join(lines)
     sequence_ids = [s["sequence"] for s in selected_scenes]
     brief_anchor = _build_brief_anchor(brief)
+    night_style=_night_figure_style(brief)
 
     return f"""
 You are a professional AI image prompt engineer specialising in cinematic flat vector-art illustrations for historical stories on YouTube Shorts.
@@ -117,17 +129,25 @@ VISUAL STYLE (must be obeyed in every enhanced prompt)
 
 YOUR TASK
 ---------
-These are the OPENING scenes of the story, in order, being used to build a vertical
-YouTube Short. Rewrite each scene below into a richer, more descriptive image
-generation prompt.
+These are OPENING scenes of the story (not necessarily contiguous — only the ones
+that still need artwork), in order, being used to build a vertical YouTube Short.
+Rewrite each scene below into a richer, more descriptive image generation prompt.
 
 Rules:
 1. Keep the same narrative action as the original — do NOT invent new story events.
 2. This will render in a vertical 9:16 (1080x1920) portrait frame — compose each
    scene as a tall portrait shot (full body or medium shot, centered), not a wide
    landscape composition. Nothing important should end up near the left/right edges.
-3. For EACH scene, first judge its actual lighting from the narrative text and the STORY
-   BRIEF's overall color mood (e.g. bright midday, dusk, deep night, firelit, cave interior).
+3. This story's NIGHT FIGURE STYLE is: "{night_style}". Apply it to every scene whose lighting
+   is dark/low-light (night, deep shadow, cave interior, backlit only by fire or moonlight):
+   - If night_style is "silhouette": render the human figures as solid black silhouettes with no
+     visible color or surface detail on the body itself, set against a colorful, lit flat-color
+     background — e.g. warm orange firelight glow, cool blue moonlight.
+   - If night_style is "colored": keep the human figures fully visible in flat stylized color
+     (skin tone, hair, simple period-appropriate clothing), just shift the palette to a cooler,
+     darker flat tone (deep blues/purples with warm firelight or moonlight accents) instead of the
+     bright daylight palette. Do not desaturate to gray — darkness is a color choice, not gloom.
+   Apply this same choice consistently across every dark scene in this story — don't mix modes.
 4. If the scene's lighting is dark/low-light (night, deep shadow, cave interior, backlit only by
    fire or moonlight): render the human figures as solid black silhouettes with no visible color or
    surface detail on the body itself, set against a colorful, lit background — e.g. warm orange
@@ -208,6 +228,19 @@ def enhance_intro_scenes(selected_scenes: list[dict], story_concept: str, story_
         print(f"[!] Groq also failed for Short prompt enhancement: {e}")
         print(f"[!] Using original visual_prompts.")
         return [s["visual_prompt"] for s in selected_scenes]
+
+
+def _normalize_enhanced_prompt(enhanced_prompt) -> str:
+    if isinstance(enhanced_prompt, dict):
+        return (
+            enhanced_prompt.get("prompt")
+            or enhanced_prompt.get("enhanced_prompt")
+            or enhanced_prompt.get("text")
+            or str(enhanced_prompt)
+        )
+    if not isinstance(enhanced_prompt, str):
+        return str(enhanced_prompt)
+    return enhanced_prompt
 
 
 def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
@@ -504,6 +537,74 @@ def write_metadata_txt(metadata_path: str, copy: dict, concept: str,
         f.write("\n".join(lines))
 
 
+# ---------------------------------------------------------------------------
+# Resumability helpers
+# ---------------------------------------------------------------------------
+
+def _image_path_for_scene(short_images_dir: str, scene: dict) -> str:
+    """
+    Stable, deterministic filename based only on scene identity (sequence +
+    start_time) — NOT on the enhanced-prompt text. The enhanced prompt is
+    regenerated by an LLM each run and its wording can vary even for the same
+    scene, so hashing it (as before) produced a different filename every run
+    and made the "already exists" check always miss. This makes reruns able
+    to actually detect and skip completed images.
+    """
+    seq = scene["sequence"]
+    start_time = scene["start_time"]
+    return os.path.join(short_images_dir, f"short_scene_{seq}_{start_time}_image.jpg")
+
+
+def _image_is_complete(path: str) -> bool:
+    return os.path.exists(path) and os.path.getsize(path) > 1000
+
+
+def _migrate_legacy_image(short_images_dir: str, scene: dict, canonical_path: str) -> None:
+    """
+    Older runs of this script named images with an extra hash segment derived
+    from the enhanced-prompt text (e.g. short_scene_1_0.0_995_image.jpg). The
+    current script uses a stable name with no hash (short_scene_1_0.0_image.jpg).
+    If the canonical file is missing but a legacy-named file for this exact
+    scene exists, rename it into place instead of re-rendering from scratch.
+    """
+    if os.path.exists(canonical_path):
+        return
+
+    seq = scene["sequence"]
+    start_time = scene["start_time"]
+    prefix = f"short_scene_{seq}_{start_time}_"
+    suffix = "_image.jpg"
+
+    for candidate in glob.glob(os.path.join(short_images_dir, f"{prefix}*{suffix}")):
+        base = os.path.basename(candidate)
+        middle = base[len(prefix):-len(suffix)]
+        if middle and middle.isdigit():
+            print(f"[*] Migrating legacy image {base} → {os.path.basename(canonical_path)}")
+            os.rename(candidate, canonical_path)
+            return
+
+
+def _enhanced_prompts_cache_path(short_dir: str) -> str:
+    return os.path.join(short_dir, "enhanced_prompts_cache.json")
+
+
+def load_enhanced_prompts_cache(short_dir: str) -> dict:
+    path = _enhanced_prompts_cache_path(short_dir)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[!] Could not read enhanced_prompts_cache.json ({e}) — starting fresh.")
+    return {}
+
+
+def save_enhanced_prompts_cache(short_dir: str, cache: dict):
+    path = _enhanced_prompts_cache_path(short_dir)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, ensure_ascii=False)
+
+
 def main():
     print("=" * 52)
     print("SHORTS COMPILER")
@@ -560,54 +661,80 @@ def main():
     print(f"[*] Renderer     : Cloudflare Workers AI ({IMAGE_MODEL}, {SHORT_W}x{SHORT_H})")
     print(f"[*] Output       : {short_dir}\n")
 
-    gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-    groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    # ------------------------------------------------------------------
+    # STEP 1: figure out exactly what's already done
+    # ------------------------------------------------------------------
+    image_paths = [_image_path_for_scene(short_images_dir, s) for s in selected_scenes]
 
-    print("[...] Enhancing opening scenes for vertical framing …")
-    enhanced_prompts = enhance_intro_scenes(selected_scenes, concept, story_tone, brief,
-                                             gemini_client, groq_client)
+    for scene, canonical_path in zip(selected_scenes, image_paths):
+        _migrate_legacy_image(short_images_dir, scene, canonical_path)
 
-    image_paths = []
-    for scene, enhanced_prompt in zip(selected_scenes, enhanced_prompts):
-        seq = scene["sequence"]
-        start_time = scene["start_time"]
+    missing_indices = [i for i, p in enumerate(image_paths) if not _image_is_complete(p)]
 
-        if isinstance(enhanced_prompt, dict):
-            enhanced_prompt = (
-                enhanced_prompt.get("prompt")
-                or enhanced_prompt.get("enhanced_prompt")
-                or enhanced_prompt.get("text")
-                or str(enhanced_prompt)
-            )
-        elif not isinstance(enhanced_prompt, str):
-            enhanced_prompt = str(enhanced_prompt)
-        
-        prompt_hash = hash(enhanced_prompt) % 1000
-        image_name = f"short_scene_{seq}_{start_time}_{prompt_hash}_image.jpg"
-        image_path = os.path.join(short_images_dir, image_name)
+    video_exists = os.path.exists(output_video_path) and os.path.getsize(output_video_path) > 1000
+    metadata_exists = os.path.exists(metadata_path) and os.path.getsize(metadata_path) > 0
 
-        if os.path.exists(image_path) and os.path.getsize(image_path) > 1000:
-            print(f"[=] Scene {seq} vertical image already exists — skipping.")
-            image_paths.append(image_path)
-            continue
+    # ------------------------------------------------------------------
+    # STEP 2: images — only touch what's missing
+    # ------------------------------------------------------------------
+    if missing_indices:
+        print(f"[*] {len(missing_indices)} of {len(selected_scenes)} scene image(s) missing — generating those.")
 
-        print(f"[...] Rendering vertical image for scene {seq}")
-        print(f"    Enhanced : {enhanced_prompt[:70]}…")
+        gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
-        if generate_image_cloudflare(enhanced_prompt, brief, image_path):
-            print(f"[✓] Saved → Short/short_scene_images/{image_name}")
-            image_paths.append(image_path)
+        cache = load_enhanced_prompts_cache(short_dir)
+        missing_scenes = [selected_scenes[i] for i in missing_indices]
+        need_enhance = [s for s in missing_scenes if str(s["sequence"]) not in cache]
+
+        if need_enhance:
+            print(f"[...] Enhancing prompts for {len(need_enhance)} scene(s) needing new artwork …")
+            new_enhanced = enhance_intro_scenes(need_enhance, concept, story_tone, brief,
+                                                 gemini_client, groq_client)
+            for scene, ep in zip(need_enhance, new_enhanced):
+                cache[str(scene["sequence"])] = _normalize_enhanced_prompt(ep)
+            save_enhanced_prompts_cache(short_dir, cache)
         else:
-            print(f"[X] Failed to render scene {seq} — aborting Short build.")
-            return
+            print("[=] All missing scenes already have cached enhanced prompts — skipping LLM call.")
 
-        time.sleep(1.5)
+        for i in missing_indices:
+            scene = selected_scenes[i]
+            seq = scene["sequence"]
+            image_path = image_paths[i]
+            enhanced_prompt = cache[str(seq)]
 
-    build_short_video(selected_scenes, image_paths, audio_path, total_duration, output_video_path)
+            print(f"[...] Rendering vertical image for scene {seq}")
+            print(f"    Enhanced : {enhanced_prompt[:70]}…")
 
-    print("\n[*] Generating Short metadata (Gemini → Groq) …")
-    copy = generate_short_copy(data, selected_scenes, brief, total_duration, gemini_client, groq_client)
-    write_metadata_txt(metadata_path, copy, concept, total_duration, len(selected_scenes))
+            if generate_image_cloudflare(enhanced_prompt, brief, image_path):
+                print(f"[✓] Saved → Short/short_scene_images/{os.path.basename(image_path)}")
+            else:
+                print(f"[X] Failed to render scene {seq} — aborting Short build.")
+                return
+
+            time.sleep(1.5)
+    else:
+        print(f"[=] All {len(selected_scenes)} scene image(s) already exist — skipping image generation entirely.")
+
+    # ------------------------------------------------------------------
+    # STEP 3: video — only build if it doesn't already exist
+    # ------------------------------------------------------------------
+    if video_exists:
+        print(f"[=] Short video already exists at {output_video_path} — skipping video build.")
+    else:
+        build_short_video(selected_scenes, image_paths, audio_path, total_duration, output_video_path)
+
+    # ------------------------------------------------------------------
+    # STEP 4: metadata — only generate if it doesn't already exist
+    # ------------------------------------------------------------------
+    if metadata_exists:
+        print(f"[=] Metadata already exists at {metadata_path} — skipping metadata generation.")
+    else:
+        print("\n[*] Generating Short metadata (Gemini → Groq) …")
+        gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+        groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+        copy = generate_short_copy(data, selected_scenes, brief, total_duration, gemini_client, groq_client)
+        write_metadata_txt(metadata_path, copy, concept, total_duration, len(selected_scenes))
 
     print(f"\n[✓] Short complete!")
     print(f"[✓] Video    : {output_video_path}")
