@@ -1,8 +1,7 @@
-# generate_audio.py
-
 import os
 import json
 import asyncio
+import random
 import edge_tts
 from pydub import AudioSegment
 from pydub.effects import strip_silence
@@ -10,9 +9,12 @@ from pydub.effects import strip_silence
 BASE_DIR = r"D:\Automated_YouTube_Pipeline"
 OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
-# --- VOICE CONFIGURATION ---
+# --- CONFIGURATION CONTROLS ---
 VOICE_MODEL = "en-US-BrianNeural"
 VOICE_RATE = "-1%" 
+
+MIN_GAP = 0.1   # Minimum organic silence gap in seconds
+MAX_GAP = 0.2   # Maximum organic silence gap in seconds
 
 # Explicitly link FFmpeg binaries for Pydub audio processing
 FFMPEG_PATH = r"D:\ffmpeg\bin"
@@ -60,19 +62,17 @@ async def generate_scene_audio(text, temp_mp3_path):
     await communicate.save(temp_mp3_path)
 
 def process_and_convert_audio(temp_mp3_path, final_wav_path):
-    """Loads the MP3, strips silences natively, saves a crisp WAV copy, and returns duration."""
+    """Loads the MP3, strips silences natively, saves a crisp WAV copy, and returns AudioSegment."""
     raw_audio = AudioSegment.from_mp3(temp_mp3_path)
     
     # Shave off the trailing dead air cleanly
     trimmed_audio = strip_silence(raw_audio, silence_thresh=-45, padding=30)
     trimmed_audio.export(final_wav_path, format="wav")
     
-    duration_secs = round(len(trimmed_audio) / 1000.0, 2)
-    
     if os.path.exists(temp_mp3_path):
         os.remove(temp_mp3_path)
         
-    return duration_secs
+    return trimmed_audio
 
 async def main():
     try:
@@ -82,8 +82,6 @@ async def main():
         return
 
     json_path = os.path.join(project_path, "video_package.json")
-    
-    # Enforce output directly to the 'converted' folder to perfectly match stitch_audio.py
     converted_dir = os.path.join(project_path, "converted")
     os.makedirs(converted_dir, exist_ok=True)
 
@@ -99,10 +97,10 @@ async def main():
         return
 
     print(f"\n[*] Active Workspace: {os.path.basename(project_path)}")
-    print(f"[*] Generating zero-silence continuous audio files inside 'converted' via {VOICE_MODEL}...")
+    print(f"[*] STEP 1: Generating individual clean WAV files via {VOICE_MODEL}...")
 
-    running_timeline_secs = 0.0
-
+    # First pass: Generate all the individual audio scene clips
+    generated_scenes = {}
     for scene in data["scenes"]:
         seq = scene.get("sequence")
         text = scene.get("narrative")
@@ -114,29 +112,72 @@ async def main():
         temp_mp3 = os.path.join(converted_dir, f"scene_{seq}_temp.mp3")
         final_wav = os.path.join(converted_dir, f"scene_{seq}.wav")
 
-        print(f"[+] Processing Scene {seq}...")
+        print(f"[+] Synthesizing Scene {seq}...")
         try:
             await generate_scene_audio(text, temp_mp3)
-            duration_secs = process_and_convert_audio(temp_mp3, final_wav)
+            scene_audio = process_and_convert_audio(temp_mp3, final_wav)
             
-            # Map clean, continuous timelines sequentially directly into the json file
-            scene["start_time"] = round(running_timeline_secs, 2)
-            scene["end_time"] = round(scene["start_time"] + duration_secs, 2)
-            
-            # Pointing path dynamically to the final folder structure
-            scene["audio_file"] = f"converted/scene_{seq}.wav"
-            
-            running_timeline_secs = scene["end_time"]
-            print(f"    -> Timeline Map: {scene['start_time']}s -> {scene['end_time']}s")
+            # Store references for the stitching phase
+            generated_scenes[seq] = {
+                "audio": scene_audio,
+                "relative_path": f"converted/scene_{seq}.wav"
+            }
         except Exception as e:
             print(f" [!] Failed to process audio for Scene {seq}: {e}")
 
+    print(f"\n[*] STEP 2: Stitching master track with dynamic pacing ({MIN_GAP}s - {MAX_GAP}s)...")
+    
+    master_track = AudioSegment.empty()
+    running_timeline_secs = 0.0
+
+    for scene in data["scenes"]:
+        seq = scene["sequence"]
+        
+        if seq not in generated_scenes:
+            print(f"[!] Warning: Missing audio data for scene_{seq}. Skipping timeline map.")
+            continue
+            
+        scene_audio = generated_scenes[seq]["audio"]
+        
+        # Set exact timeline start
+        scene["start_time"] = round(running_timeline_secs, 2)
+        spoken_duration_secs = len(scene_audio) / 1000.0
+        
+        # Generate random gap silence segment
+        random_gap_secs = round(random.uniform(MIN_GAP, MAX_GAP), 2)
+        silence_padding_ms = int(random_gap_secs * 1000)
+        silence_segment = AudioSegment.silent(duration=silence_padding_ms)
+        
+        # Build master track sequence
+        master_track += scene_audio + silence_segment
+        
+        # Calculate block duration and expected end time
+        total_block_duration = spoken_duration_secs + random_gap_secs
+        scene["end_time"] = round(scene["start_time"] + total_block_duration, 2)
+        
+        # Map dynamic relative asset path
+        scene["audio_file"] = generated_scenes[seq]["relative_path"]
+        
+        running_timeline_secs = scene["end_time"]
+        print(f"[+] Locked Scene {seq} | Voice: {round(spoken_duration_secs, 2)}s | Gap: {random_gap_secs}s | Timeline: {scene['start_time']}s -> {scene['end_time']}s")
+
+    # Clean up contiguous transitions for the video manifest so there are no absolute blank frames
+    for i in range(len(data["scenes"]) - 1):
+        if "end_time" in data["scenes"][i] and "start_time" in data["scenes"][i+1]:
+            data["scenes"][i]["end_time"] = data["scenes"][i+1]["start_time"]
+
+    # Export final master voice track
+    output_audio_path = os.path.join(project_path, "final_voiceover.wav")
+    master_track.export(output_audio_path, format="wav")
+
+    # Save the synchronized manifest back to disk
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    print(f"\n[✓] Audio generation complete! 'video_package.json' has been updated with final timelines.")
-    print(f"[*] Saved folder: {converted_dir}")
-    print(f"[*] Total Voice Runtime Track: {round(running_timeline_secs, 2)} seconds")
+    print(f"\n[✓] Entire Audio Workflow Completed Successfully!")
+    print(f"[*] Converted Workspace: {converted_dir}")
+    print(f"[*] Master Track Saved: {output_audio_path}")
+    print(f"[*] Total Master Runtime Track: {round(len(master_track) / 1000.0, 2)} seconds")
 
 if __name__ == "__main__":
     asyncio.run(main())
