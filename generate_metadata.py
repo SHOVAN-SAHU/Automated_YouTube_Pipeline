@@ -10,7 +10,7 @@ from google import genai
 from groq import Groq
 from dotenv import load_dotenv
 
-from pipeline_config import CHARACTER_DESIGN, AESTHETIC_ANCHOR as STYLE_ANCHOR, NEGATIVE_BAN, RECOMMENDED_IMAGE_MODEL
+from pipeline_config import CHARACTER_DESIGN, AESTHETIC_ANCHOR as STYLE_ANCHOR, RECOMMENDED_IMAGE_MODEL
 
 load_dotenv()
 
@@ -346,13 +346,11 @@ def refine_metadata(scenes: list, current_meta: dict, brief: dict, gemini_client
 
 
 def _build_thumbnail_prompt(thumb_concept: str, brief: dict) -> str:
-    # Fixed: this used to concatenate NEGATIVE_BAN directly against "Main
-    # character:" with no separator/space, running them together as one
-    # unreadable blob for the renderer. Now uses the same "|" delimiter
-    # style as generate_images.py for consistency.
+    # NOTE: no "Avoid: {NEGATIVE_BAN}" — lucid-origin has no negative_prompt
+    # parameter, so that text was being read as positive prompt content
+    # instead of being suppressed. Same fix as generate_images.py.
     full_prompt=(
         f"{AESTHETIC_ANCHOR} | "
-        f"Avoid: {NEGATIVE_BAN} | "
         f"Character's role: {brief.get('character_role', 'an ancient human')}. "
         f"Setting: {brief.get('setting', 'unknown')}. "
         f"Tone: {brief.get('tone', 'dramatic')}. "

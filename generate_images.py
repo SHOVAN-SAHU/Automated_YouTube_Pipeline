@@ -10,7 +10,10 @@ from google import genai
 from groq import Groq
 from dotenv import load_dotenv
 
-from pipeline_config import CHARACTER_DESIGN, AESTHETIC_ANCHOR as STYLE_ANCHOR, NEGATIVE_BAN, RECOMMENDED_IMAGE_MODEL
+from pipeline_config import (
+    CHARACTER_DESIGN, AESTHETIC_ANCHOR as STYLE_ANCHOR, NEGATIVE_BAN, RECOMMENDED_IMAGE_MODEL,
+    CAMERA_SHOTS, MOOD_DAYLIGHT, MOOD_HARSH, MOOD_NIGHT, MOOD_DIAGRAM,
+)
 
 load_dotenv()
 
@@ -115,6 +118,53 @@ def _fmt_scenes(scenes: list[dict], label: str) -> str:
     return "\n".join(lines)
 
 
+def _suggested_camera(sequence: int) -> str:
+    # Rotates through CAMERA_SHOTS by sequence number so consecutive scenes
+    # default to different framing instead of the same centered standing
+    # shot every time. It's only a *suggestion* fed to the enhancer — rule 6
+    # below tells it to override this when the scene's actual action calls
+    # for something else.
+    return CAMERA_SHOTS[(sequence - 1) % len(CAMERA_SHOTS)]
+
+
+def _resolve_mood(lighting_text: str, night_style: str) -> str:
+    """
+    Turns a scene's free-text `lighting` tag (written by an LLM in
+    generate_story.py, so wording varies) into exactly ONE of the four fixed
+    mood snippets from pipeline_config, via simple keyword matching. Without
+    this, MOOD_DAYLIGHT/HARSH/NIGHT/DIAGRAM were imported but never actually
+    read anywhere — the enhancer was just left to freely reinterpret the
+    lighting tag in prose each time, with no fixed vocabulary to land on.
+    """
+    text=(lighting_text or "").lower()
+    if any(k in text for k in ("night", "moonlight", "firelight", "dark", "cave", "dusk", "torch")):
+        return MOOD_NIGHT
+    if any(k in text for k in ("diagram", "explainer", "cream background", "plain background")):
+        return MOOD_DIAGRAM
+    if any(k in text for k in ("harsh", "storm", "danger", "bleak", "grim", "freezing", "blizzard")):
+        return MOOD_HARSH
+    return MOOD_DAYLIGHT
+
+
+def _fmt_target_scenes(scenes: list[dict], night_style: str) -> str:
+    if not scenes:
+        return ""
+    lines=["\n[TARGET SCENES — enhance these]"]
+    for s in scenes:
+        tags=[]
+        if s.get("location"):
+            tags.append(f"Location: {s['location']}")
+        if s.get("lighting"):
+            tags.append(f"Lighting: {s['lighting']}")
+        if s.get("established_facts"):
+            tags.append(f"Established facts: {s['established_facts']}")
+        tags.append(f"Suggested camera/framing: {_suggested_camera(s['sequence'])}")
+        tags.append(f"Resolved mood/palette (use this wording): {_resolve_mood(s.get('lighting', ''), night_style)}")
+        tag_str=f" [{' | '.join(tags)}]"
+        lines.append(f"  Scene {s['sequence']}{tag_str}: {s['visual_prompt']}")
+    return "\n".join(lines)
+
+
 def _build_enhance_prompt(
     batch: list[dict],
     context_before: list[dict],
@@ -123,12 +173,12 @@ def _build_enhance_prompt(
     story_tone: str,
     brief: dict,
 ) -> str:
+    night_style=_night_figure_style(brief)
     context_block=_fmt_scenes(context_before, "PREVIOUS SCENES — for visual continuity")
-    target_block=_fmt_scenes(batch, "TARGET SCENES — enhance these")
+    target_block=_fmt_target_scenes(batch, night_style)
     upcoming_block=_fmt_scenes(context_after, "UPCOMING SCENES — for narrative awareness")
     sequence_ids=[s["sequence"] for s in batch]
     brief_anchor=_build_brief_anchor(brief)
-    night_style=_night_figure_style(brief)
 
     return f"""
 You are a professional AI image prompt engineer specialising in a locked, minimalist cartoon character design for a YouTube explainer channel.
@@ -177,10 +227,11 @@ Rules:
    that's already stated once above in VISUAL STYLE and will be included automatically at
    render time. Repeating it here would just waste your word budget. Focus entirely on THIS
    scene's specific pose, action, expression, and background.
-3. Use each TARGET scene's own Location / Lighting / Established facts tags as the primary
-   signal for how to render it, cross-checked against the STORY BRIEF's overall color mood.
-4. This story's NIGHT FIGURE STYLE is: "{night_style}". Apply it to every scene whose lighting
-   is dark/low-light (night, deep shadow, cave interior, backlit only by fire or moonlight):
+3. Each TARGET scene lists a "Resolved mood/palette" tag — use that EXACT wording as the
+   color/lighting basis of your enhanced prompt (it was already matched to the scene's
+   Location/Lighting tags for you). Don't re-derive the mood yourself from scratch.
+4. This story's NIGHT FIGURE STYLE is: "{night_style}". Apply it whenever the Resolved
+   mood/palette tag is the night one (deep blue palette, firelight/moonlight accents):
    - If night_style is "silhouette": render the character as a solid black silhouette with no
      visible color or surface detail on the body itself, set against a colorful, lit flat-color
      background — e.g. warm orange firelight glow, cool blue moonlight.
@@ -189,10 +240,16 @@ Rules:
      moonlight accents) instead of the bright daylight palette. Do not desaturate to gray —
      darkness is a color choice, not gloom.
    Apply this same choice consistently across every dark scene in this story — don't mix modes.
-5. If a scene's lighting is bright/well-lit (daylight, open sky, sunlit clearing): render the
-   character fully visible and colorful against a vividly colored, flat-painted daylight background.
-6. Add specific visual detail: pose, gesture, composition framing, background elements
-   appropriate to the scene's specific moment — not generic.
+5. For all other Resolved mood/palette tags (daylight/harsh/diagram), render the character
+   fully visible and colorful in that palette — never desaturated or gray regardless of mood.
+6. VARY THE STAGING. Each scene lists a "Suggested camera/framing" — use it unless the
+   scene's own action clearly calls for something else, and NEVER give two consecutive
+   scenes the same shot type or the same pose. Reflective/narration-only lines (no
+   explicit physical action, e.g. "you are the last of your kind") are NOT an excuse to
+   default to a plain centered standing shot — invent the camera angle, distance, and
+   which part of the character is shown (close on the face, from behind looking at the
+   landscape, low angle, aerial, etc.) even while the underlying pose stays simple. Two
+   scenes can share the same narrative beat and still look completely different on screen.
 7. Reference the setting and props from the STORY BRIEF where relevant.
 8. If the scene includes animals, render them in the same lighting mode (silhouette or colored) as
    the rest of that scene — not photorealistic.
@@ -285,18 +342,24 @@ def enhance_batch(
 
 
 def _build_render_prompt(enhanced_prompt: str, brief: dict) -> str:
+    # NOTE: no "Avoid: {NEGATIVE_BAN}" here anymore. lucid-origin has no
+    # negative_prompt parameter (confirmed against Cloudflare's published
+    # schema), so that text was being read as positive prompt content —
+    # almost certainly the cause of the partially-desaturated/grayscale
+    # render, since "grayscale, sepia" was sitting right there as "content"
+    # the model should include. NEGATIVE_BAN is still used, correctly, inside
+    # _build_enhance_prompt where it's shown to a text-generating LLM that
+    # actually understands negation.
     brief_anchor=_build_brief_anchor(brief)
     full_prompt=(
         f"{AESTHETIC_ANCHOR} | "
         f"{brief_anchor} | "
-        f"Avoid: {NEGATIVE_BAN} | "
         f"Current Scene: {enhanced_prompt}"
     )
     if len(full_prompt) > MAX_PROMPT_CHARS:
         # Trim from the middle of "Current Scene" rather than blindly slicing
         # the whole assembled string — that used to risk cutting off the
-        # negative-prompt list or the scene action itself, whichever happened
-        # to fall past the cutoff.
+        # scene action itself, whichever happened to fall past the cutoff.
         overflow=len(full_prompt) - MAX_PROMPT_CHARS
         print(f"[!] Prompt too long ({len(full_prompt)} chars) — trimming {overflow} chars from the scene description.")
         static_part=full_prompt[:full_prompt.rfind("Current Scene:") + len("Current Scene: ")]
