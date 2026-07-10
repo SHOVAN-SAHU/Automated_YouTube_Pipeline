@@ -498,12 +498,14 @@ def generate_image_cloudflare(enhanced_prompt: str, brief: dict, output_path: st
                     account_failed = True
                     break
 
-                try:
-                    image_bytes=_extract_image_bytes(response)
-                except ValueError as e:
-                    print(f"[X] Account {idx} returned a response we couldn't decode as an image: {e}")
-                    account_failed = True
-                    break
+                # try:
+                #     image_bytes=_extract_image_bytes(response)
+                # except ValueError as e:
+                #     print(f"[X] Account {idx} returned a response we couldn't decode as an image: {e}")
+                #     account_failed = True
+                #     break
+
+                image_bytes = response.content
 
                 with open(output_path, "wb") as f:
                     f.write(image_bytes)
